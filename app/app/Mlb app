@@ -1,0 +1,1241 @@
+“use client”;
+import { useState, useEffect } from “react”;
+
+const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Barlow+Condensed:wght@600;700;800;900&display=swap');`;
+
+const C = {
+bg:”#080A0D”, panel:”#0F1117”, panel2:”#141720”,
+border:“rgba(255,255,255,0.08)”, borderLight:“rgba(255,255,255,0.05)”,
+green:”#22C55E”, red:”#EF4444”, yellow:”#EAB308”, blue:”#3B82F6”,
+orange:”#F97316”, purple:”#A855F7”, teal:”#14B8A6”,
+dim:“rgba(255,255,255,0.45)”, dimmer:“rgba(255,255,255,0.2)”,
+text:”#F1F5F9”, subtext:“rgba(255,255,255,0.6)”,
+};
+
+const TODAY_DATE = new Date().toLocaleDateString(“en-US”,{weekday:“long”,month:“long”,day:“numeric”,year:“numeric”});
+
+// ── PARK FACTORS ─────────────────────────────────────────────────────────────
+const PARK_FACTORS = {
+“Coors Field”:1.38,“Fenway Park”:1.09,“Great American Ball Park”:1.08,
+“Globe Life Field”:1.05,“Guaranteed Rate Field”:1.05,“Rogers Centre”:1.04,
+“Yankee Stadium”:1.12,“Citizens Bank Park”:1.07,“Angel Stadium”:0.96,
+“Oracle Park”:0.88,“Petco Park”:0.90,“Tropicana Field”:0.88,
+“loanDepot park”:0.92,“Target Field”:0.95,“Busch Stadium”:0.96,
+“Nationals Park”:0.97,“T-Mobile Park”:0.94,“Minute Maid Park”:0.98,
+“PNC Park”:0.93,“Kauffman Stadium”:0.97,“Chase Field”:1.04,
+“Truist Park”:1.01,“American Family Field”:1.02,“Wrigley Field”:1.03,
+“Dodger Stadium”:0.96,“Progressive Field”:0.98,“Camden Yards”:1.04,
+“Comerica Park”:0.93,“Citi Field”:0.94,
+};
+const getPF = (park) => {
+if (!park) return 1.0;
+const key = Object.keys(PARK_FACTORS).find(k => park.toLowerCase().includes(k.toLowerCase()));
+return key ? PARK_FACTORS[key] : 1.0;
+};
+
+// ── SCORING ──────────────────────────────────────────────────────────────────
+function scoreK(p) {
+const s = {
+k:   Math.min(10, Math.max(0, ((p.kPct - 10) / 25) * 10)),
+oK:  Math.min(10, Math.max(0, ((p.oppKPct - 14) / 18) * 10)),
+csw: Math.min(10, Math.max(0, ((p.csw - 20) / 18) * 10)),
+mix: Math.min(10, Math.max(1, p.pitchMix || 5)),
+wh:  Math.min(10, Math.max(0, ((p.oppWhiff - 16) / 18) * 10)),
+l5:  Math.min(10, Math.max(1, p.recentForm || 5)),
+};
+return Math.round((s.k*0.30 + s.oK*0.25 + s.csw*0.15 + s.mix*0.15 + s.wh*0.10 + s.l5*0.05) * 10);
+}
+
+function scoreHR(h) {
+const s = {
+bar: Math.min(10, Math.max(0, (h.barrel / 20) * 10)),
+hh:  Math.min(10, Math.max(0, ((h.hardHit - 25) / 25) * 10)),
+iso: Math.min(10, Math.max(0, (h.iso / 0.35) * 10)),
+pfb: Math.min(10, Math.max(0, (h.pullFB / 25) * 10)),
+hr9: Math.min(10, Math.max(0, (h.pitcherHR9 / 2.0) * 10)),
+pw:  Math.min(10, Math.max(1, h.parkWeather || 5)),
+rhr: Math.min(10, Math.max(1, h.recentHR || 5)),
+};
+return Math.round((s.bar*0.28 + s.hh*0.22 + s.iso*0.15 + s.pfb*0.15 + s.hr9*0.10 + s.pw*0.05 + s.rhr*0.05) * 10);
+}
+
+function simK(p, n=1000) {
+const adj = (p.kPct/100) + ((p.oppKPct-22)/100)*0.3 + ((p.csw-28)/100)*0.2;
+let res = [];
+for (let i=0; i<n; i++) {
+const u1=Math.random(), u2=Math.random();
+const z = Math.sqrt(-2*Math.log(u1)) * Math.cos(2*Math.PI*u2);
+const pa = Math.floor((80+Math.random()*25)/3.8);
+res.push(Math.max(0, Math.round(Math.max(0.05, adj+z*0.06) * pa * (0.85+Math.random()*0.3))));
+}
+res.sort((a,b)=>a-b);
+return { mean: res.reduce((s,v)=>s+v,0)/n, results:res, p25:res[Math.floor(n*0.25)], p50:res[Math.floor(n*0.50)], p75:res[Math.floor(n*0.75)] };
+}
+
+function simHR(h, n=1000) {
+const pw = h.parkWeather || 5;
+const base = (h.barrel/100)*0.55*(h.hardHit/100)*1.8*((pw-5)*0.04+1)*(h.pullFB/18);
+let hits = 0;
+for (let i=0; i<n; i++) {
+const abs = 3+Math.floor(Math.random()*2);
+for (let a=0; a<abs; a++) { if (Math.random()<base*(0.7+Math.random()*0.6)) { hits++; break; } }
+}
+return { prob:hits/n, hits, n };
+}
+
+function impliedProb(odds) { return odds<0 ? (-odds)/(-odds+100) : 100/(odds+100); }
+function calcEV(prob, odds) {
+const bp = impliedProb(odds);
+const pay = odds>0 ? odds/100 : 100/(-odds);
+return { ev:(prob*pay-(1-prob))*100, edge:(prob-bp)*100, bp };
+}
+function kellyCalc(prob, odds) {
+const pay = odds>0 ? odds/100 : 100/(-odds);
+const k = Math.max(0, (prob*pay-(1-prob))/pay);
+return { full:k, quarter:k*0.25, units:+(k*0.25*10).toFixed(2) };
+}
+
+function kVerdict(s) {
+if(s>=88) return {label:“ELITE”,  color:C.green,  emoji:“🔥”, tag:“ELITE”};
+if(s>=75) return {label:“GREAT”,  color:”#86EFAC”, emoji:“✅”, tag:“GREAT”};
+if(s>=62) return {label:“GOOD”,   color:C.yellow, emoji:“👍”, tag:“GOOD”};
+if(s>=48) return {label:“AVG”,    color:C.orange, emoji:“⚠️”, tag:“AVG”};
+return          {label:“AVOID”,   color:C.red,    emoji:“❌”, tag:“BAD”};
+}
+function hrVerdict(s) {
+if(s>=82) return {label:“TOP TARGET”, color:C.green,  emoji:“🔥”, tag:“ELITE”};
+if(s>=70) return {label:“STRONG”,     color:”#86EFAC”, emoji:“✅”, tag:“GREAT”};
+if(s>=58) return {label:“SOLID”,      color:C.yellow, emoji:“👍”, tag:“GOOD”};
+if(s>=44) return {label:“LEAN”,       color:C.orange, emoji:“⚠️”, tag:“AVG”};
+return          {label:“AVOID”,       color:C.red,    emoji:“❌”, tag:“BAD”};
+}
+function nrfiVerdict(rate) {
+if(rate>=70) return {label:“STRONG NRFI”, color:C.green,  emoji:“🔥”, rec:“NRFI”};
+if(rate>=60) return {label:“LEAN NRFI”,   color:”#86EFAC”, emoji:“✅”, rec:“NRFI”};
+if(rate>=50) return {label:“SLIGHT NRFI”, color:C.yellow, emoji:“👍”, rec:“NRFI”};
+if(rate>=42) return {label:“TOSS-UP”,     color:C.dim,    emoji:“⚖️”, rec:”—”};
+return             {label:“LEAN YRFI”,    color:C.red,    emoji:“💥”, rec:“YRFI”};
+}
+
+function windIcon(w) {
+if(!w||/dome|indoor|calm/i.test(w)) return {icon:“🏟️”, color:C.dim};
+if(/out/i.test(w)) return {icon:“💨”, color:C.green};
+if(/in/i.test(w))  return {icon:“🌬️”, color:C.red};
+return {icon:“🌀”, color:C.yellow};
+}
+function tempIcon(t) {
+if(!t) return {icon:“🌡️”, label:”—”, color:C.dim};
+if(t>=75) return {icon:“☀️”, label:`${t}°`, color:C.yellow};
+if(t>=60) return {icon:“⛅”, label:`${t}°`, color:C.dim};
+if(t>=50) return {icon:“🌥️”, label:`${t}°`, color:C.blue};
+return          {icon:“🥶”, label:`${t}°`, color:C.blue};
+}
+
+// ── MAIN AI FETCH — uses web search to get projected lineups ─────────────────
+async function fetchFullSlate(setLog) {
+setLog(l => […l, {msg:“Fetching live slate…”, color:C.teal}]);
+try {
+const res = await fetch(”/api/slate”, { method:“POST” });
+if (!res.ok) { setLog(l=>[…l,{msg:`Server error ${res.status}`,color:C.red}]); return null; }
+const data = await res.json();
+if (data.error) { setLog(l=>[…l,{msg:`Error: ${data.error}`,color:C.red}]); return null; }
+const p=data.pitchers?.length||0, h=data.hitters?.length||0, n=data.nrfi?.length||0;
+if (!p && !h) { setLog(l=>[…l,{msg:“No players found”,color:C.orange}]); return null; }
+setLog(l=>[…l,{msg:`✓ Live: ${p} pitchers · ${h} hitters · ${n} NRFI`,color:C.green}]);
+return data;
+} catch(e) {
+setLog(l=>[…l,{msg:`Fetch error: ${e.message.slice(0,60)}`,color:C.red}]);
+return null;
+}
+}
+
+function buildSlate(raw) {
+const pitchers = (raw.pitchers || []).map(p => {
+const pf = getPF(p.park);
+const data = {
+…p,
+parkFactor: pf,
+pitchMix: Math.min(10, Math.max(1, (p.kPct||22)/3.2)),
+recentForm: Math.min(10, Math.max(1, (p.kPct||22)/3.5)),
+line: { dk: p.kLine||5.5, fd: p.kLine||5.5 },
+openLine: { dk: p.kLine||5.5, fd: p.kLine||5.5 },
+lineMoved: false,
+ump: { name:“Today’s Ump”, kRate:”+0.0%”, favor:“Neutral” },
+};
+const score = scoreK(data);
+const sim = simK(data, 1000);
+const hitRate = sim.results.filter(k=>k>=data.line.dk).length/sim.results.length;
+return { …data, score, sim, hitRate, evDK:calcEV(hitRate,-115), evFD:calcEV(hitRate,-110), kelly:kellyCalc(hitRate,-115), verdict:kVerdict(score) };
+}).sort((a,b) => b.score-a.score);
+
+const hitters = (raw.hitters || []).map(h => {
+const pf = getPF(h.park);
+const windScore = /out/i.test(h.wind||””) ? 8 : /in/i.test(h.wind||””) ? 3 : 5;
+const parkWeather = Math.min(10, Math.max(1, (pf-0.85)*35 + windScore*0.5));
+const data = { …h, parkFactor:pf, parkWeather, recentHR:5, weather:{park:h.park, wind:h.wind, temp:h.temp, factor:pf}, line:{dk:0.5,fd:0.5} };
+const score = scoreHR(data);
+const sim = simHR(data, 1000);
+return { …data, score, sim, evDK:calcEV(sim.prob,300), evFD:calcEV(sim.prob,280), kelly:kellyCalc(sim.prob,300), verdict:hrVerdict(score) };
+}).sort((a,b) => b.score-a.score);
+
+const nrfiGames = (raw.nrfi || []).map((g,i) => ({
+id:i+1, …g,
+parkFactor: getPF(g.park),
+yrfiHitRate: 100-(g.nrfiHitRate||52),
+nrfiStreak: 0,
+awayP:{name:g.awayPitcher||“TBD”,f1Era:g.awayF1ERA||3.5,f1KPct:22,hrPer9:1.0},
+homeP:{name:g.homePitcher||“TBD”,f1Era:g.homeF1ERA||3.5,f1KPct:22,hrPer9:1.0},
+awayTop:{name:“Lineup TBD”,obp:.320,slg:.440},
+homeTop:{name:“Lineup TBD”,obp:.320,slg:.440},
+hist:{nrfi:Math.round((g.nrfiHitRate||52)*2.1),total:210},
+}));
+
+return { pitchers, hitters, nrfiGames };
+}
+
+// ── UI COMPONENTS ─────────────────────────────────────────────────────────────
+function PlayBadge({verdict,small}) {
+const bg = {“ELITE”:“rgba(34,197,94,0.15)”,“GREAT”:“rgba(134,239,172,0.12)”,“GOOD”:“rgba(234,179,8,0.12)”,“AVG”:“rgba(249,115,22,0.12)”,“BAD”:“rgba(239,68,68,0.12)”}[verdict.tag]||“rgba(255,255,255,0.07)”;
+return <span style={{display:“inline-flex”,alignItems:“center”,gap:3,background:bg,border:`1px solid ${verdict.color}40`,borderRadius:5,padding:small?“1px 5px”:“2px 8px”,fontSize:small?10:11,fontWeight:700,color:verdict.color,whiteSpace:“nowrap”}}><span>{verdict.emoji}</span>{verdict.tag}</span>;
+}
+function EVTag({ev,book}) {
+const pos=ev>0;
+return <span style={{fontSize:10,fontWeight:700,color:pos?C.green:C.red,background:pos?“rgba(34,197,94,0.1)”:“rgba(239,68,68,0.1)”,border:`1px solid ${pos?C.green+"40":C.red+"40"}`,borderRadius:4,padding:“1px 6px”}}>{pos?”+”:””}{ev.toFixed(1)}% {book}</span>;
+}
+function HRBar({simPct,bookPct,color}) {
+const pos=simPct>=bookPct;
+return(
+<div>
+<div style={{position:“relative”,height:7,background:“rgba(255,255,255,0.07)”,borderRadius:99,marginBottom:3}}>
+<div style={{position:“absolute”,left:0,top:0,height:“100%”,width:`${Math.min(100,simPct)}%`,background:pos?C.green:C.red,borderRadius:99,opacity:0.85}}/>
+<div style={{position:“absolute”,top:-2,left:`${Math.min(97,bookPct)}%`,width:2,height:11,background:“rgba(255,255,255,0.4)”,borderRadius:1}}/>
+</div>
+<div style={{display:“flex”,justifyContent:“space-between”}}>
+<span style={{fontSize:10,color:pos?C.green:C.red,fontWeight:600}}>{Math.round(simPct)}% model</span>
+<span style={{fontSize:10,color:C.dimmer}}>book {Math.round(bookPct)}%</span>
+</div>
+</div>
+);
+}
+function WeatherStrip({wind,temp,parkFactor}) {
+const w=windIcon(wind), t=tempIcon(temp), p=parkFactor;
+const pIcon = p>=1.15?“🚀”:p>=1.05?“📈”:p>=0.95?“➖”:“📉”;
+const pColor = p>=1.05?C.green:p<=0.93?C.red:C.dim;
+if(/dome|indoor/i.test(wind||””)) return <span style={{fontSize:10,color:C.dim}}>🏟️ Dome</span>;
+return(
+<div style={{display:“inline-flex”,alignItems:“center”,gap:10}}>
+<span style={{fontSize:10}}>{w.icon} <span style={{color:w.color,fontWeight:600}}>{wind}</span></span>
+<span style={{fontSize:10}}>{t.icon} <span style={{color:t.color,fontWeight:600}}>{t.label}</span></span>
+<span style={{fontSize:10}}>{pIcon} <span style={{color:pColor,fontWeight:600}}>{p?.toFixed(2)}x</span></span>
+</div>
+);
+}
+function SimChart({results,line,p25,p75,color}) {
+const buckets = Array.from({length:16},(_,i)=>results.filter(k=>k===i).length);
+const max = Math.max(…buckets,1);
+return(
+<div>
+<div style={{display:“flex”,gap:2,alignItems:“flex-end”,height:36}}>
+{buckets.map((cnt,i)=>(
+<div key={i} style={{flex:1,height:Math.max(2,(cnt/max)*36),background:i>=line?`${color}CC`:“rgba(255,255,255,0.12)”,borderRadius:2}}/>
+))}
+</div>
+<div style={{display:“flex”,justifyContent:“space-between”,marginTop:3}}>
+<span style={{fontSize:9,color:C.dimmer}}>0K</span>
+<span style={{fontSize:9,color:C.yellow}}>line {line} · p25:{p25} p75:{p75}</span>
+<span style={{fontSize:9,color:C.dimmer}}>15K+</span>
+</div>
+</div>
+);
+}
+function LadderTable({results,line}) {
+const targets = [line-1,line-0.5,line,line+0.5,line+1,line+1.5].filter(t=>t>=1.5);
+return(
+<div>
+<div style={{fontSize:10,fontWeight:700,color:C.dim,marginBottom:6}}>🪜 LADDER OPPORTUNITIES</div>
+<div style={{border:`1px solid ${C.border}`,borderRadius:8,overflow:“hidden”}}>
+<div style={{display:“grid”,gridTemplateColumns:“1fr 1fr 1fr 1fr”,background:“rgba(255,255,255,0.04)”}}>
+{[“Line”,“Hit%”,“DK EV”,“FD EV”].map(h=><div key={h} style={{padding:“5px 8px”,fontSize:9,fontWeight:600,color:C.dim}}>{h}</div>)}
+</div>
+{targets.map(t=>{
+const hr=results.filter(k=>k>=t).length/results.length;
+const eDK=calcEV(hr,-115), eFD=calcEV(hr,-110);
+const isMain=t===line;
+return(
+<div key={t} style={{display:“grid”,gridTemplateColumns:“1fr 1fr 1fr 1fr”,background:isMain?“rgba(234,179,8,0.07)”:“transparent”,borderTop:`1px solid ${C.border}`}}>
+<div style={{padding:“6px 8px”,fontSize:11,fontWeight:isMain?700:400,color:isMain?C.yellow:C.text}}>{t>line?“🔼”:t<line?“🔽”:“▶”} O{t}</div>
+<div style={{padding:“6px 8px”,fontSize:11,fontWeight:600,color:hr>=0.55?C.green:hr>=0.45?C.yellow:C.red}}>{Math.round(hr*100)}%</div>
+<div style={{padding:“6px 8px”,fontSize:11,fontWeight:600,color:eDK.ev>0?C.green:C.red}}>{eDK.ev>0?”+”:””}{eDK.ev.toFixed(1)}%</div>
+<div style={{padding:“6px 8px”,fontSize:11,fontWeight:600,color:eFD.ev>0?C.green:C.red}}>{eFD.ev>0?”+”:””}{eFD.ev.toFixed(1)}%</div>
+</div>
+);
+})}
+</div>
+</div>
+);
+}
+function KellyBox({kelly}) {
+return(
+<div style={{background:“rgba(20,184,166,0.07)”,border:`1px solid ${C.teal}30`,borderRadius:8,padding:“8px 12px”}}>
+<div style={{fontSize:10,fontWeight:700,color:C.teal,marginBottom:4}}>💰 KELLY CRITERION</div>
+<div style={{display:“grid”,gridTemplateColumns:“1fr 1fr 1fr”,gap:6}}>
+{[{l:“Full Kelly”,v:`${(kelly.full*100).toFixed(1)}%`},{l:“¼ Kelly”,v:`${(kelly.quarter*100).toFixed(1)}%`},{l:“Rec Units”,v:`${kelly.units}u`}].map(s=>(
+<div key={s.l} style={{textAlign:“center”}}>
+<div style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:16,fontWeight:800,color:C.teal}}>{s.v}</div>
+<div style={{fontSize:9,color:C.dimmer}}>{s.l}</div>
+</div>
+))}
+</div>
+</div>
+);
+}
+
+// ── AI STREAMING ANALYSIS ─────────────────────────────────────────────────────
+function generateLocalAnalysis(prompt) {
+const get = (pattern, def=0) => parseFloat(prompt.match(pattern)?.[1]||def);
+
+const isHR   = /hr prop/i.test(prompt);
+const isNRFI = /nrfi/i.test(prompt);
+
+if (isNRFI) {
+const rate = get(/NRFI hit rate ([\d.]+)/, 52);
+const away = prompt.match(/Away SP: ([\w. ]+) F1/)?.[1]?.trim()||“Away SP”;
+const home = prompt.match(/Home SP: ([\w. ]+) F1/)?.[1]?.trim()||“Home SP”;
+const awayF1 = get(/Away SP.*?F1 ERA ([\d.]+)/, 4);
+const homeF1 = get(/Home SP.*?F1 ERA ([\d.]+)/, 4);
+const avgF1 = ((awayF1+homeF1)/2).toFixed(2);
+const rec = rate>=65?“strong NRFI play”:rate>=55?“lean NRFI”:rate<=38?“strong YRFI play”:rate<=45?“lean YRFI”:“coin flip — skip”;
+return `With a ${rate}% historical NRFI rate, this is a ${rec}. Combined first-inning ERA of ${avgF1} between ${away} and ${home} ${parseFloat(avgF1)<3.5?"supports the NRFI further":"adds some risk"}. ${rate>=60?"Both starters keeping it clean early makes this a quality lean.":"Look for a better line or pass on this one."}`;
+}
+
+if (isHR) {
+const barrel  = get(/Barrel=([\d.]+)/);
+const hardHit = get(/HardHit=([\d.]+)/);
+const iso     = get(/ISO=([\d.]+)/);
+const hrProb  = get(/Sim HR=([\d.]+)/);
+const evDK    = get(/DK EV=([-\d.]+)/);
+const score   = get(/Score=([\d.]+)/);
+const park    = get(/Park=([\d.]+)/);
+const name    = prompt.match(/HR prop: ([\w. ]+) (/)?.[1]?.trim()||“This hitter”;
+const pitcher = prompt.match(/vs ([\w. ]+) (/)?.[1]?.trim()||“the opposing pitcher”;
+const barrelTier = barrel>=18?“elite barrel rate”:barrel>=14?“above-average barrel rate”:barrel>=10?“solid barrel rate”:“below-average barrel rate”;
+const verdict = score>=80?“a top-tier HR target today”:score>=65?“a solid play”:score>=50?“a marginal lean”:“one to avoid”;
+const evTxt   = evDK>=10?`+${evDK.toFixed(1)}% EV makes this a strong value bet`:evDK>=3?`+${evDK.toFixed(1)}% EV gives a slight edge`:evDK>=0?`roughly fair value at current price`:`${evDK.toFixed(1)}% EV — overpriced, look for a better number`;
+return `${name} posts an ${barrelTier} of ${barrel}% with ISO ${iso?.toFixed?iso.toFixed(3):iso} against ${pitcher}, rating ${score}/100 — ${verdict}. Sim HR probability of ${hrProb.toFixed(1)}% vs the book's ~25% implied odds shows ${evTxt}. ${park>=1.1?"The ballpark is a clear HR booster":"Park is neutral to slightly suppressive"} — ${hrProb>=30?"play it":"consider waiting for better odds"}.`;
+}
+
+// Pitcher K
+const kPct    = get(/K%=([\d.]+)/);
+const oppKPct = get(/OppK%=([\d.]+)/);
+const csw     = get(/CSW=([\d.]+)/);
+const era     = get(/ERA=([\d.]+)/);
+const score   = get(/Score=([\d.]+)/);
+const proj    = get(/Proj:? ([\d.]+)K/);
+const line    = prompt.match(/O/U ([\d.]+)/)?.[1]||”—”;
+const evDK    = get(/DK EV=([-\d.]+)/);
+const hitRate = get(/HitRate=([\d.]+)/);
+const name    = prompt.match(/K prop: ([\w. ]+) (/)?.[1]?.trim()||“This pitcher”;
+const kTier   = kPct>=28?“elite strikeout rate”:kPct>=24?“above-average K rate”:kPct>=20?“league-average K rate”:“below-average K rate”;
+const verdict = score>=80?“strong over lean”:score>=65?“solid over lean”:score>=50?“marginal lean”:“avoid the over”;
+const evTxt   = evDK>=8?`+${evDK.toFixed(1)}% EV is a strong edge`:evDK>=3?`+${evDK.toFixed(1)}% EV gives a playable edge`:evDK>=0?“roughly fair value”:“negative EV, pass”;
+return `${name} carries an ${kTier} of ${kPct}% with CSW ${csw}% and a projected ${proj>0?proj.toFixed(1)+"K":"similar output"} against the O/U ${line} — ${verdict} at ${score}/100. Hit rate of ${hitRate>0?hitRate.toFixed(0)+"%":"—"} on the line shows ${evTxt}. ${oppKPct>=24?"The opposing lineup's high K rate is a key tailwind":"The opposing lineup makes contact, which limits upside"}.`;
+}
+
+function AIBlock({prompt}) {
+const [text,setText]       = useState(””);
+const [done,setDone]       = useState(false);
+const [started,setStarted] = useState(false);
+
+useEffect(()=>{
+if (started) return;
+setStarted(true);
+(async()=>{
+let usedAPI = false;
+
+```
+  // Try backend API (works on Vercel, fails silently in sandbox)
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(()=>ctrl.abort(), 6000);
+    const res = await fetch("/api/analyze", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({prompt}),
+      signal:ctrl.signal
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      const ct = res.headers.get("content-type")||"";
+      if (ct.includes("text/event-stream")) {
+        usedAPI = true;
+        const reader=res.body.getReader(); const dec=new TextDecoder(); let buf="";
+        while(true){
+          const{done:d,value}=await reader.read(); if(d)break;
+          buf+=dec.decode(value,{stream:true});
+          const lines=buf.split("\n"); buf=lines.pop()||"";
+          for(const line of lines){
+            if(line.startsWith("data: ")){
+              const d=line.slice(6); if(d==="[DONE]")continue;
+              try{const j=JSON.parse(d); if(j.text)setText(p=>p+j.text);}catch{}
+            }
+          }
+        }
+      }
+    }
+  } catch(e){ /* sandbox — fall through */ }
+
+  // Always fall through to local if API didn't stream anything
+  if (!usedAPI) {
+    const analysis = generateLocalAnalysis(prompt);
+    const words = analysis.split(" ");
+    for (let i=0; i<words.length; i++) {
+      await new Promise(r=>setTimeout(r,25));
+      setText(p=>p+(i===0?"": " ")+words[i]);
+    }
+  }
+  setDone(true);
+})();
+```
+
+},[]);
+
+return(
+<div style={{background:“rgba(168,85,247,0.06)”,border:`1px solid ${C.purple}30`,borderRadius:10,padding:“10px 12px”}}>
+<div style={{display:“flex”,alignItems:“center”,gap:6,marginBottom:6}}>
+<span style={{fontSize:11,fontWeight:700,color:C.purple}}>🤖 AI ANALYSIS</span>
+{!done&&<span style={{fontSize:10,color:C.dimmer,animation:“pulse 1s infinite”}}>writing…</span>}
+</div>
+<p style={{fontSize:12,color:C.subtext,lineHeight:1.65,margin:0}}>
+{text?text:<span style={{color:C.dimmer,fontSize:11}}>Analyzing…</span>}
+{!done&&text&&<span style={{color:C.purple}}>▋</span>}
+</p>
+</div>
+);
+}
+
+// ── PITCHER ROW ───────────────────────────────────────────────────────────────
+function PRow({p,rank,expanded,onToggle}) {
+return(
+<>
+<div onClick={onToggle} style={{display:“grid”,gridTemplateColumns:“28px 1fr 52px 62px”,padding:“10px 14px”,borderBottom:`1px solid ${C.borderLight}`,cursor:“pointer”,background:expanded?“rgba(255,255,255,0.025)”:“transparent”}}>
+<div style={{fontSize:12,color:C.dimmer,paddingTop:3}}>{rank}</div>
+<div>
+<div style={{display:“flex”,alignItems:“center”,gap:6,marginBottom:3,flexWrap:“wrap”}}>
+<span style={{fontSize:14,fontWeight:700,color:C.text}}>{p.name}</span>
+<span style={{fontSize:10,color:C.dimmer,background:“rgba(255,255,255,0.07)”,borderRadius:3,padding:“0 4px”}}>{p.hand}</span>
+<PlayBadge verdict={p.verdict} small/>
+</div>
+<div style={{fontSize:11,color:C.dim,marginBottom:2}}>
+{p.team} vs {p.opp} <span style={{color:C.yellow,fontWeight:600}}>· {p.gameTime}</span>
+</div>
+<div style={{fontSize:10,color:C.dimmer,marginBottom:2}}>{p.park}</div>
+<WeatherStrip wind={p.wind} temp={p.temp} parkFactor={p.parkFactor}/>
+</div>
+<div style={{textAlign:“center”,paddingTop:3}}>
+<div style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:17,fontWeight:900,color:C.blue}}>{p.sim.mean.toFixed(1)}</div>
+<div style={{fontSize:9,color:C.dimmer}}>proj K</div>
+</div>
+<div style={{textAlign:“right”,paddingTop:3}}>
+<div style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:17,fontWeight:900,color:p.verdict.color}}>{p.score}</div>
+<div style={{fontSize:9,color:C.dimmer}}>/100</div>
+</div>
+</div>
+{expanded&&(
+<div style={{background:“rgba(255,255,255,0.015)”,borderBottom:`1px solid ${C.border}`,padding:“12px 14px”,display:“flex”,flexDirection:“column”,gap:12}}>
+<div style={{display:“flex”,alignItems:“center”,justifyContent:“space-between”,flexWrap:“wrap”,gap:6}}>
+<PlayBadge verdict={p.verdict}/>
+<div style={{display:“flex”,gap:6}}><span style={{fontSize:11,color:C.dim}}>DK O/U {p.line.dk}</span><span style={{fontSize:11,color:C.dim}}>FD O/U {p.line.fd}</span></div>
+</div>
+<AIBlock prompt={`K prop: ${p.name} (${p.hand}) vs ${p.opp} at ${p.park}. ERA=${p.era}, K%=${p.kPct}%, OppK%=${p.oppKPct}%, CSW=${p.csw}%, Score=${p.score}/100. Line: O/U ${p.line.dk}. Proj: ${p.sim.mean.toFixed(1)}K. HitRate: ${Math.round(p.hitRate*100)}%. DK EV: ${p.evDK.ev.toFixed(1)}%. Wind: ${p.wind}.`}/>
+<div style={{display:“grid”,gridTemplateColumns:“1fr 1fr 1fr”,gap:6}}>
+{[{l:“K%”,v:`${p.kPct}%`,w:“30%”},{l:“Opp K%”,v:`${p.oppKPct}%`,w:“25%”},{l:“CSW%”,v:`${p.csw}%`,w:“15%”},{l:“Pitch Mix”,v:`${(p.pitchMix||5).toFixed(1)}/10`,w:“15%”},{l:“Opp Whiff”,v:`${p.oppWhiff}%`,w:“10%”},{l:“L5 Form”,v:`${(p.recentForm||5).toFixed(1)}/10`,w:“5%”}].map(s=>(
+<div key={s.l} style={{background:“rgba(255,255,255,0.04)”,borderRadius:6,padding:“6px 8px”}}>
+<div style={{fontSize:9,color:C.dimmer}}>{s.l} <span style={{color:C.green}}>({s.w})</span></div>
+<div style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:15,fontWeight:700,color:C.text}}>{s.v}</div>
+</div>
+))}
+</div>
+<div>
+<div style={{fontSize:10,fontWeight:600,color:C.dim,marginBottom:5}}>HIT RATE vs LINE O{p.line.dk}</div>
+<HRBar simPct={p.hitRate*100} bookPct={p.evDK.bp*100} color={p.hitRate>=p.evDK.bp?C.green:C.red}/>
+<div style={{display:“flex”,gap:6,marginTop:6}}><EVTag ev={p.evDK.ev} book="DK"/><EVTag ev={p.evFD.ev} book="FD"/></div>
+</div>
+<SimChart results={p.sim.results} line={p.line.dk} p25={p.sim.p25} p75={p.sim.p75} color={p.verdict.color}/>
+<LadderTable results={p.sim.results} line={p.line.dk}/>
+<KellyBox kelly={p.kelly}/>
+</div>
+)}
+</>
+);
+}
+
+// ── HITTER ROW ────────────────────────────────────────────────────────────────
+function HRow({h,rank,expanded,onToggle}) {
+return(
+<>
+<div onClick={onToggle} style={{display:“grid”,gridTemplateColumns:“28px 1fr 52px 62px”,padding:“10px 14px”,borderBottom:`1px solid ${C.borderLight}`,cursor:“pointer”,background:expanded?“rgba(255,255,255,0.025)”:“transparent”}}>
+<div style={{fontSize:12,color:C.dimmer,paddingTop:3}}>{rank}</div>
+<div>
+<div style={{display:“flex”,alignItems:“center”,gap:6,marginBottom:3,flexWrap:“wrap”}}>
+<span style={{fontSize:14,fontWeight:700,color:C.text}}>{h.name}</span>
+<span style={{fontSize:10,color:C.dimmer,background:“rgba(255,255,255,0.07)”,borderRadius:3,padding:“0 4px”}}>{h.oppHand}</span>
+<PlayBadge verdict={h.verdict} small/>
+</div>
+<div style={{fontSize:11,color:C.dim,marginBottom:2}}>{h.team} vs {h.oppPitcher}</div>
+<div style={{fontSize:10,color:C.dimmer,marginBottom:2}}>{h.park}</div>
+<WeatherStrip wind={h.wind} temp={h.temp} parkFactor={h.parkFactor}/>
+</div>
+<div style={{textAlign:“center”,paddingTop:3}}>
+<div style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:17,fontWeight:900,color:C.blue}}>{(h.sim.prob*100).toFixed(1)}%</div>
+<div style={{fontSize:9,color:C.dimmer}}>HR%</div>
+</div>
+<div style={{textAlign:“right”,paddingTop:3}}>
+<div style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:17,fontWeight:900,color:h.verdict.color}}>{h.score}</div>
+<div style={{fontSize:9,color:C.dimmer}}>/100</div>
+</div>
+</div>
+{expanded&&(
+<div style={{background:“rgba(255,255,255,0.015)”,borderBottom:`1px solid ${C.border}`,padding:“12px 14px”,display:“flex”,flexDirection:“column”,gap:12}}>
+<div style={{display:“flex”,alignItems:“center”,justifyContent:“space-between”,flexWrap:“wrap”,gap:6}}>
+<PlayBadge verdict={h.verdict}/>
+<div style={{display:“flex”,gap:6}}><span style={{fontSize:11,color:C.dim}}>DK +300</span><span style={{fontSize:11,color:C.dim}}>FD +280</span></div>
+</div>
+<AIBlock prompt={`HR prop: ${h.name} (${h.hand}) vs ${h.oppPitcher} (${h.oppHand}) at ${h.park}. Barrel=${h.barrel}%, HardHit=${h.hardHit}%, ISO=${h.iso}, PullFB=${h.pullFB}, PitcherHR9=${h.pitcherHR9}. Score=${h.score}/100. Sim HR=${(h.sim.prob*100).toFixed(1)}%. DK EV=${h.evDK.ev.toFixed(1)}%. Park=${h.parkFactor}x. Wind=${h.wind}.`}/>
+<div style={{display:“grid”,gridTemplateColumns:“1fr 1fr”,gap:6}}>
+{[{l:“Barrel%”,v:`${h.barrel}%`,w:“28%”},{l:“Hard Hit%”,v:`${h.hardHit}%`,w:“22%”},{l:“ISO/xSLG”,v:h.iso?.toFixed(3)||”—”,w:“15%”},{l:“Pull×FB”,v:`${h.pullFB}`,w:“15%”},{l:“Pitcher HR/9”,v:h.pitcherHR9?.toFixed(2)||”—”,w:“10%”},{l:“Park+Weather”,v:`${(h.parkWeather||5).toFixed(1)}/10`,w:“5%”}].map(s=>(
+<div key={s.l} style={{background:“rgba(255,255,255,0.04)”,borderRadius:6,padding:“6px 8px”}}>
+<div style={{fontSize:9,color:C.dimmer}}>{s.l} <span style={{color:C.orange}}>({s.w})</span></div>
+<div style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:15,fontWeight:700,color:C.text}}>{s.v}</div>
+</div>
+))}
+</div>
+<div>
+<div style={{fontSize:10,fontWeight:600,color:C.dim,marginBottom:5}}>SIM HR% vs BOOK</div>
+<HRBar simPct={h.sim.prob*100} bookPct={h.evDK.bp*100} color={h.sim.prob>=h.evDK.bp?C.green:C.red}/>
+<div style={{display:“flex”,gap:6,marginTop:6}}><EVTag ev={h.evDK.ev} book="DK"/><EVTag ev={h.evFD.ev} book="FD"/></div>
+</div>
+<div style={{background:“rgba(59,130,246,0.07)”,border:`1px solid ${C.blue}25`,borderRadius:8,padding:“8px 12px”}}>
+<span style={{fontSize:11,color:C.subtext}}><span style={{color:C.green,fontWeight:700}}>{h.sim.hits}</span>/1,000 sims hit HR · <span style={{color:C.green,fontWeight:700}}>{(h.sim.prob*100).toFixed(1)}%</span> probability</span>
+</div>
+<KellyBox kelly={h.kelly}/>
+</div>
+)}
+</>
+);
+}
+
+// ── NRFI CARD ────────────────────────────────────────────────────────────────
+function NRFICard({g,expanded,onToggle}) {
+const nv = nrfiVerdict(g.nrfiHitRate);
+const nrfiColor = g.nrfiHitRate>=60?C.green:g.nrfiHitRate>=50?C.yellow:C.red;
+return(
+<>
+<div style={{background:C.panel,border:`1px solid ${expanded?nv.color+"50":C.border}`,borderRadius:12,marginBottom:10,overflow:“hidden”,cursor:“pointer”}} onClick={onToggle}>
+<div style={{padding:“11px 14px”}}>
+<div style={{display:“flex”,justifyContent:“space-between”,alignItems:“flex-start”,marginBottom:8}}>
+<div>
+<div style={{display:“flex”,alignItems:“center”,gap:8,marginBottom:3}}>
+<span style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:18,fontWeight:900,color:C.text}}>{g.away} @ {g.home}</span>
+<span style={{fontSize:11,fontWeight:700,color:C.yellow}}>{g.time}</span>
+</div>
+<div style={{fontSize:11,color:C.dim,marginBottom:4}}>{g.park}</div>
+<WeatherStrip wind={g.wind} temp={g.temp} parkFactor={g.parkFactor}/>
+</div>
+<div style={{textAlign:“center”}}>
+<div style={{fontSize:22}}>{nv.emoji}</div>
+<div style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:13,fontWeight:800,color:nv.color}}>{nv.rec}</div>
+</div>
+</div>
+<div style={{display:“grid”,gridTemplateColumns:“1fr 1fr”,gap:8,marginBottom:10}}>
+{[{team:g.away,name:g.awayP.name,f1:g.awayF1ERA},{team:g.home,name:g.homeP.name,f1:g.homeF1ERA}].map(s=>(
+<div key={s.team} style={{background:“rgba(255,255,255,0.04)”,borderRadius:8,padding:“7px 10px”}}>
+<div style={{fontSize:9,color:C.dimmer}}>{s.team} SP</div>
+<div style={{fontSize:13,fontWeight:700,color:C.text}}>{s.name}</div>
+<div style={{fontSize:10,fontWeight:700,color:s.f1<=2.5?C.green:s.f1<=3.5?C.yellow:C.red}}>F1 ERA {s.f1}</div>
+</div>
+))}
+</div>
+{[{label:“NRFI”,rate:g.nrfiHitRate,color:nrfiColor},{label:“YRFI”,rate:g.yrfiHitRate,color:g.yrfiHitRate>=60?C.red:C.yellow}].map(b=>(
+<div key={b.label} style={{display:“flex”,alignItems:“center”,gap:8,marginBottom:6}}>
+<span style={{fontSize:11,fontWeight:700,color:b.color,minWidth:38}}>{b.label}</span>
+<div style={{flex:1,position:“relative”,height:18,background:“rgba(255,255,255,0.06)”,borderRadius:6,overflow:“hidden”}}>
+<div style={{position:“absolute”,left:0,top:0,height:“100%”,width:`${b.rate}%`,background:b.color,opacity:0.85}}/>
+<span style={{position:“absolute”,left:8,top:“50%”,transform:“translateY(-50%)”,fontSize:10,fontWeight:700,color:”#fff”}}>{b.rate}%</span>
+</div>
+<span style={{fontSize:11,fontWeight:800,color:b.color,minWidth:32,textAlign:“right”}}>{b.rate}%</span>
+</div>
+))}
+<div style={{marginTop:8,background:`${nv.color}0F`,border:`1px solid ${nv.color}30`,borderRadius:7,padding:“5px 10px”}}>
+<span style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:12,fontWeight:800,color:nv.color}}>{nv.emoji} {nv.label} · L10: {g.nrfiL10}/10</span>
+</div>
+</div>
+</div>
+{expanded&&(
+<div style={{background:“rgba(255,255,255,0.02)”,border:`1px solid ${C.border}`,borderRadius:12,padding:“14px”,marginBottom:10,marginTop:-8}}>
+<AIBlock prompt={`NRFI/YRFI: ${g.away} @ ${g.home}. Away SP: ${g.awayP.name} F1 ERA ${g.awayF1ERA}. Home SP: ${g.homeP.name} F1 ERA ${g.homeF1ERA}. NRFI hit rate ${g.nrfiHitRate}%, L10: ${g.nrfiL10}/10. Park ${g.park} (${g.parkFactor}x). Wind: ${g.wind}. 3 sentence sharp recommendation.`}/>
+</div>
+)}
+</>
+);
+}
+
+// ── WEIGHTS TAB ───────────────────────────────────────────────────────────────
+const DEFAULT_K_WEIGHTS  = {pitcherK:30, oppK:25, csw:15, pitchMix:15, oppWhiff:10, recentL5:5};
+const DEFAULT_HR_WEIGHTS = {barrel:28, hardHit:22, iso:15, pullFB:15, pitcherHR9:10, parkWeather:5, recentL10:5};
+
+function WeightSlider({label, value, onChange, color}) {
+return (
+<div style={{marginBottom:14}}>
+<div style={{display:“flex”,justifyContent:“space-between”,alignItems:“center”,marginBottom:6}}>
+<span style={{fontSize:12,color:C.subtext}}>{label}</span>
+<div style={{display:“flex”,alignItems:“center”,gap:8}}>
+<span style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:18,fontWeight:800,color}}>{value}%</span>
+</div>
+</div>
+<input type=“range” min={0} max={60} step={1} value={value}
+onChange={e=>onChange(Number(e.target.value))}
+style={{width:“100%”,accentColor:color,height:4,cursor:“pointer”}}
+/>
+<div style={{display:“flex”,justifyContent:“space-between”,marginTop:2}}>
+<span style={{fontSize:8,color:C.dimmer}}>0%</span>
+<span style={{fontSize:8,color:C.dimmer}}>60%</span>
+</div>
+</div>
+);
+}
+
+function WeightsTab({hitters, pitchers, onRescore}) {
+const [kW, setKW] = useState({…DEFAULT_K_WEIGHTS});
+const [hrW, setHrW] = useState({…DEFAULT_HR_WEIGHTS});
+const [activeModel, setActiveModel] = useState(“hr”);
+const [applied, setApplied] = useState(false);
+
+const kTotal  = Object.values(kW).reduce((s,v)=>s+v,0);
+const hrTotal = Object.values(hrW).reduce((s,v)=>s+v,0);
+const kOk  = kTotal  === 100;
+const hrOk = hrTotal === 100;
+
+function applyWeights() {
+// Rescore all hitters with new HR weights
+const rescored = hitters.map(h => {
+const s = {
+bar: Math.min(10, Math.max(0, (h.barrel/20)*10)),
+hh:  Math.min(10, Math.max(0, ((h.hardHit-25)/25)*10)),
+iso: Math.min(10, Math.max(0, (h.iso/0.35)*10)),
+pfb: Math.min(10, Math.max(0, (h.pullFB/25)*10)),
+hr9: Math.min(10, Math.max(0, (h.pitcherHR9/2.0)*10)),
+pw:  Math.min(10, h.parkWeather||5),
+rhr: Math.min(10, h.recentHR||5),
+};
+const raw = s.bar*(hrW.barrel/100) + s.hh*(hrW.hardHit/100) + s.iso*(hrW.iso/100) +
+s.pfb*(hrW.pullFB/100) + s.hr9*(hrW.pitcherHR9/100) + s.pw*(hrW.parkWeather/100) + s.rhr*(hrW.recentL10/100);
+const score = Math.round(raw*10);
+return {…h, score, verdict: hrVerdict(score)};
+}).sort((a,b)=>b.score-a.score);
+
+```
+// Rescore pitchers with new K weights
+const rescoredP = pitchers.map(p => {
+  const s = {
+    k:   Math.min(10, Math.max(0, ((p.kPct-10)/25)*10)),
+    oK:  Math.min(10, Math.max(0, ((p.oppKPct-14)/18)*10)),
+    csw: Math.min(10, Math.max(0, ((p.csw-20)/18)*10)),
+    mix: Math.min(10, p.pitchMix||5),
+    wh:  Math.min(10, Math.max(0, ((p.oppWhiff-16)/18)*10)),
+    l5:  Math.min(10, p.recentForm||5),
+  };
+  const raw = s.k*(kW.pitcherK/100) + s.oK*(kW.oppK/100) + s.csw*(kW.csw/100) +
+              s.mix*(kW.pitchMix/100) + s.wh*(kW.oppWhiff/100) + s.l5*(kW.recentL5/100);
+  const score = Math.round(raw*10);
+  return {...p, score, verdict: kVerdict(score)};
+}).sort((a,b)=>b.score-a.score);
+
+onRescore(rescored, rescoredP);
+setApplied(true);
+setTimeout(()=>setApplied(false), 2000);
+```
+
+}
+
+function resetWeights() {
+setKW({…DEFAULT_K_WEIGHTS});
+setHrW({…DEFAULT_HR_WEIGHTS});
+}
+
+const kFields  = [{k:“pitcherK”,l:“Pitcher K%”},{k:“oppK”,l:“Opp Team K%”},{k:“csw”,l:“CSW%”},{k:“pitchMix”,l:“Pitch Mix Quality”},{k:“oppWhiff”,l:“Opp Whiff%”},{k:“recentL5”,l:“Recent Form (L5)”}];
+const hrFields = [{k:“barrel”,l:“Barrel%”},{k:“hardHit”,l:“Hard Hit%”},{k:“iso”,l:“ISO / xSLG”},{k:“pullFB”,l:“Pull × FB%”},{k:“pitcherHR9”,l:“Pitcher HR/9”},{k:“parkWeather”,l:“Park + Weather”},{k:“recentL10”,l:“Recent Form (L10)”}];
+
+return (
+<div style={{paddingBottom:80}}>
+{/* Model toggle */}
+<div style={{display:“flex”,borderBottom:`1px solid ${C.border}`}}>
+{[{k:“hr”,l:“💥 HR Model”,c:C.orange},{k:“k”,l:“⚡ K Model”,c:C.green}].map(m=>(
+<button key={m.k} onClick={()=>setActiveModel(m.k)} style={{flex:1,padding:“10px 0”,background:“transparent”,border:“none”,cursor:“pointer”,fontSize:12,fontWeight:700,color:activeModel===m.k?”#fff”:C.dim,borderBottom:`2px solid ${activeModel===m.k?m.c:"transparent"}`}}>{m.l}</button>
+))}
+</div>
+
+```
+  <div style={{padding:"14px"}}>
+    {/* Total indicator */}
+    {(()=>{
+      const total = activeModel==="hr" ? hrTotal : kTotal;
+      const ok = total === 100;
+      const over = total > 100;
+      return (
+        <div style={{background:ok?"rgba(34,197,94,0.08)":over?"rgba(239,68,68,0.08)":"rgba(234,179,8,0.08)",border:`1px solid ${ok?C.green:over?C.red:C.yellow}40`,borderRadius:10,padding:"10px 14px",marginBottom:16,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:11,fontWeight:700,color:ok?C.green:over?C.red:C.yellow}}>
+              {ok?"✓ Weights balance to 100%":over?`⚠️ Over by ${total-100}% — reduce some weights`:`⚠️ ${100-total}% remaining to allocate`}
+            </div>
+            <div style={{fontSize:10,color:C.dimmer,marginTop:2}}>All weights must sum to exactly 100% to apply</div>
+          </div>
+          <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:28,fontWeight:900,color:ok?C.green:over?C.red:C.yellow}}>{total}%</div>
+        </div>
+      );
+    })()}
+
+    {/* Sliders */}
+    {activeModel==="hr" ? (
+      <div>
+        <div style={{fontSize:11,fontWeight:700,color:C.dim,marginBottom:12,letterSpacing:0.5}}>💥 HOME RUN MODEL WEIGHTS</div>
+        {hrFields.map(f=>(
+          <WeightSlider key={f.k} label={f.l} value={hrW[f.k]} color={C.orange}
+            onChange={v=>setHrW(w=>({...w,[f.k]:v}))}/>
+        ))}
+      </div>
+    ) : (
+      <div>
+        <div style={{fontSize:11,fontWeight:700,color:C.dim,marginBottom:12,letterSpacing:0.5}}>⚡ STRIKEOUT MODEL WEIGHTS</div>
+        {kFields.map(f=>(
+          <WeightSlider key={f.k} label={f.l} value={kW[f.k]} color={C.green}
+            onChange={v=>setKW(w=>({...w,[f.k]:v}))}/>
+        ))}
+      </div>
+    )}
+
+    {/* Visual weight bar */}
+    <div style={{marginBottom:16}}>
+      <div style={{fontSize:10,color:C.dimmer,marginBottom:6}}>WEIGHT DISTRIBUTION</div>
+      <div style={{display:"flex",height:10,borderRadius:99,overflow:"hidden",gap:1}}>
+        {(activeModel==="hr"?hrFields:kFields).map((f,i)=>{
+          const val = activeModel==="hr" ? hrW[f.k] : kW[f.k];
+          const colors=[C.green,C.blue,C.orange,C.purple,C.teal,C.yellow,C.red];
+          return <div key={f.k} style={{width:`${val}%`,background:colors[i%colors.length],transition:"width 0.3s",minWidth:val>0?2:0}}/>;
+        })}
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:"4px 10px",marginTop:6}}>
+        {(activeModel==="hr"?hrFields:kFields).map((f,i)=>{
+          const val = activeModel==="hr" ? hrW[f.k] : kW[f.k];
+          const colors=[C.green,C.blue,C.orange,C.purple,C.teal,C.yellow,C.red];
+          return <span key={f.k} style={{fontSize:9,color:colors[i%colors.length]}}>{f.l.split(" ")[0]} {val}%</span>;
+        })}
+      </div>
+    </div>
+
+    {/* Action buttons */}
+    <div style={{display:"flex",gap:8}}>
+      <button onClick={resetWeights} style={{flex:1,padding:"10px",background:"rgba(255,255,255,0.06)",border:`1px solid ${C.border}`,borderRadius:10,color:C.dim,fontSize:12,fontWeight:600,cursor:"pointer"}}>
+        ↺ Reset to Default
+      </button>
+      <button onClick={applyWeights} disabled={!kOk||!hrOk}
+        style={{flex:2,padding:"10px",background:applied?"rgba(34,197,94,0.2)":kOk&&hrOk?"rgba(34,197,94,0.15)":"rgba(255,255,255,0.04)",border:`1px solid ${applied?C.green:kOk&&hrOk?C.green+"50":C.border}`,borderRadius:10,color:applied?C.green:kOk&&hrOk?C.green:C.dimmer,fontSize:12,fontWeight:700,cursor:kOk&&hrOk?"pointer":"not-allowed",transition:"all 0.2s"}}>
+        {applied?"✓ Rankings Updated!":kOk&&hrOk?"⚡ Apply & Re-rank":"Fix weights to apply"}
+      </button>
+    </div>
+
+    {/* Default weights reference */}
+    <div style={{marginTop:20,background:C.panel2,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px"}}>
+      <div style={{fontSize:10,fontWeight:700,color:C.dim,marginBottom:8}}>📋 DEFAULT WEIGHTS REFERENCE</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+        <div>
+          <div style={{fontSize:10,color:C.green,fontWeight:700,marginBottom:4}}>⚡ K MODEL</div>
+          {kFields.map(f=><div key={f.k} style={{display:"flex",justifyContent:"space-between",marginBottom:2}}><span style={{fontSize:10,color:C.dim}}>{f.l}</span><span style={{fontSize:10,color:C.green,fontWeight:600}}>{DEFAULT_K_WEIGHTS[f.k]}%</span></div>)}
+        </div>
+        <div>
+          <div style={{fontSize:10,color:C.orange,fontWeight:700,marginBottom:4}}>💥 HR MODEL</div>
+          {hrFields.map(f=><div key={f.k} style={{display:"flex",justifyContent:"space-between",marginBottom:2}}><span style={{fontSize:10,color:C.dim}}>{f.l.split(" ").slice(0,2).join(" ")}</span><span style={{fontSize:10,color:C.orange,fontWeight:600}}>{DEFAULT_HR_WEIGHTS[f.k]}%</span></div>)}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+```
+
+);
+}
+
+// ── LOAD SCREEN ───────────────────────────────────────────────────────────────
+function LoadScreen({onDone,onData}) {
+const [status,setStatus] = useState(“Loading today’s slate…”);
+const [pct,setPct]       = useState(0);
+
+useEffect(()=>{
+// Load sample slate immediately, enter app, fetch live in background
+const steps = [
+[100,  “Connecting to MLB data feed…”],
+[250,  “Loading projected pitchers…”],
+[400,  “Loading HR targets…”],
+[550,  “Running simulations…”],
+[700,  “Calculating EV + Kelly…”],
+[850,  “Ready ✓”],
+];
+steps.forEach(([delay, msg], i) => {
+setTimeout(()=>{
+setStatus(msg);
+setPct(Math.round(((i+1)/steps.length)*100));
+}, delay);
+});
+// Enter app after 1 second with sample slate
+setTimeout(()=>{
+onData(getSampleSlate());
+onDone();
+}, 1000);
+},[]);
+
+return(
+<div style={{minHeight:“100vh”,background:”#000”,display:“flex”,flexDirection:“column”,alignItems:“center”,justifyContent:“center”,padding:32,fontFamily:”‘Inter’,sans-serif”}}>
+<div style={{fontSize:40,marginBottom:12}}>⚾</div>
+<div style={{fontFamily:”‘Barlow Condensed’,sans-serif”,fontSize:24,fontWeight:900,color:”#fff”,letterSpacing:1,marginBottom:6}}>MLB PROP ENGINE</div>
+<div style={{fontSize:12,color:C.dim,marginBottom:36}}>{TODAY_DATE}</div>
+<div style={{width:“100%”,maxWidth:300}}>
+<div style={{fontSize:13,color:C.teal,marginBottom:12,textAlign:“center”}}>{status}</div>
+<div style={{height:4,background:“rgba(255,255,255,0.08)”,borderRadius:99,overflow:“hidden”}}>
+<div style={{height:“100%”,width:`${pct}%`,background:`linear-gradient(90deg,${C.green},${C.teal})`,borderRadius:99,transition:“width 0.3s ease”}}/>
+</div>
+<div style={{textAlign:“center”,marginTop:8,fontSize:11,color:C.dimmer}}>{pct}%</div>
+</div>
+</div>
+);
+}
+
+// ── TODAY’S REAL SLATE — April 6, 2026 (sourced live) ────────────────────────
+function getSampleSlate() {
+const raw = {
+pitchers: [
+// CHC @ TB 4:10 PM — Taillon vs McClanahan
+{name:“J. Taillon”,     team:“CHC”,opp:“TB”, hand:“RHP”,gameTime:“4:10 PM ET”,park:“Tropicana Field”,   wind:“Dome”,     temp:72, era:3.68,kPct:20.8,oppKPct:19.2,csw:27.4,oppWhiff:20.8,kLine:4.5},
+{name:“S. McClanahan”,  team:“TB”, opp:“CHC”,hand:“LHP”,gameTime:“4:10 PM ET”,park:“Tropicana Field”,   wind:“Dome”,     temp:72, era:3.20,kPct:26.4,oppKPct:24.1,csw:30.8,oppWhiff:25.9,kLine:5.0},
+// MIL @ BOS 6:45 PM — Woodruff vs Bello
+{name:“B. Woodruff”,    team:“MIL”,opp:“BOS”,hand:“RHP”,gameTime:“6:45 PM ET”,park:“Fenway Park”,       wind:“Out 12mph”,temp:58, era:3.12,kPct:29.1,oppKPct:26.4,csw:33.2,oppWhiff:27.1,kLine:6.5},
+{name:“B. Bello”,       team:“BOS”,opp:“MIL”,hand:“RHP”,gameTime:“6:45 PM ET”,park:“Fenway Park”,       wind:“Out 12mph”,temp:58, era:3.35,kPct:22.8,oppKPct:22.9,csw:28.4,oppWhiff:24.1,kLine:5.0},
+// STL @ WSH 6:45 PM — Pallante vs Littell
+{name:“A. Pallante”,    team:“STL”,opp:“WSH”,hand:“RHP”,gameTime:“6:45 PM ET”,park:“Nationals Park”,    wind:“In 8mph”,  temp:63, era:4.47,kPct:16.8,oppKPct:20.1,csw:24.8,oppWhiff:21.4,kLine:3.5},
+{name:“Z. Littell”,     team:“WSH”,opp:“STL”,hand:“RHP”,gameTime:“6:45 PM ET”,park:“Nationals Park”,    wind:“In 8mph”,  temp:63, era:5.10,kPct:18.2,oppKPct:21.2,csw:24.1,oppWhiff:22.8,kLine:3.5},
+// LAD @ TOR 7:07 PM — Wrobleski vs Scherzer
+{name:“J. Wrobleski”,   team:“LAD”,opp:“TOR”,hand:“LHP”,gameTime:“7:07 PM ET”,park:“Rogers Centre”,     wind:“Calm”,     temp:55, era:7.62,kPct:19.4,oppKPct:23.1,csw:26.1,oppWhiff:24.4,kLine:4.0},
+{name:“M. Scherzer”,    team:“TOR”,opp:“LAD”,hand:“RHP”,gameTime:“7:07 PM ET”,park:“Rogers Centre”,     wind:“Calm”,     temp:55, era:3.21,kPct:24.8,oppKPct:21.8,csw:29.4,oppWhiff:23.1,kLine:5.5},
+// PIT @ SD 6:40 PM — Chandler vs German Marquez
+{name:“B. Chandler”,    team:“PIT”,opp:“SD”, hand:“RHP”,gameTime:“6:40 PM ET”,park:“Petco Park”,        wind:“Calm”,     temp:68, era:2.80,kPct:27.4,oppKPct:22.8,csw:31.8,oppWhiff:24.2,kLine:5.5},
+{name:“G. Marquez”,     team:“SD”, opp:“PIT”,hand:“RHP”,gameTime:“6:40 PM ET”,park:“Petco Park”,        wind:“Calm”,     temp:68, era:7.62,kPct:17.1,oppKPct:25.1,csw:22.8,oppWhiff:26.4,kLine:3.5},
+// PHI @ SF 9:45 PM — Painter vs Houser (Gausman pitches later this week)
+{name:“A. Painter”,     team:“PHI”,opp:“SF”, hand:“RHP”,gameTime:“9:45 PM ET”,park:“Oracle Park”,       wind:“Calm”,     temp:59, era:1.69,kPct:30.2,oppKPct:22.4,csw:34.1,oppWhiff:23.8,kLine:6.0},
+{name:“A. Houser”,      team:“SF”, opp:“PHI”,hand:“RHP”,gameTime:“9:45 PM ET”,park:“Oracle Park”,       wind:“Calm”,     temp:59, era:1.69,kPct:16.8,oppKPct:23.9,csw:23.4,oppWhiff:25.5,kLine:3.5},
+// DET @ MIN 7:40 PM — Mize vs Ryan
+{name:“C. Mize”,        team:“DET”,opp:“MIN”,hand:“RHP”,gameTime:“7:40 PM ET”,park:“Target Field”,      wind:“In 6mph”,  temp:49, era:2.80,kPct:28.8,oppKPct:22.1,csw:32.4,oppWhiff:23.8,kLine:6.0},
+{name:“J. Ryan”,        team:“MIN”,opp:“DET”,hand:“RHP”,gameTime:“7:40 PM ET”,park:“Target Field”,      wind:“In 6mph”,  temp:49, era:5.62,kPct:19.8,oppKPct:24.8,csw:25.8,oppWhiff:26.1,kLine:4.0},
+// SEA @ TEX 8:05 PM — Gilbert vs deGrom
+{name:“L. Gilbert”,     team:“SEA”,opp:“TEX”,hand:“RHP”,gameTime:“8:05 PM ET”,park:“Globe Life Field”,  wind:“Calm”,     temp:74, era:6.75,kPct:27.1,oppKPct:20.2,csw:31.4,oppWhiff:21.8,kLine:6.0},
+{name:“J. deGrom”,      team:“TEX”,opp:“SEA”,hand:“RHP”,gameTime:“8:05 PM ET”,park:“Globe Life Field”,  wind:“Calm”,     temp:74, era:5.79,kPct:28.8,oppKPct:22.4,csw:32.1,oppWhiff:23.1,kLine:6.5},
+// HOU @ COL 8:40 PM — Brown on IL (shoulder), Cody Bolton starts
+{name:“C. Bolton”,      team:“HOU”,opp:“COL”,hand:“RHP”,gameTime:“8:40 PM ET”,park:“Coors Field”,       wind:“Out 9mph”, temp:68, era:4.82,kPct:19.8,oppKPct:24.8,csw:25.4,oppWhiff:26.1,kLine:3.5},
+{name:“R. Feltner”,     team:“COL”,opp:“HOU”,hand:“RHP”,gameTime:“8:40 PM ET”,park:“Coors Field”,       wind:“Out 9mph”, temp:68, era:5.80,kPct:19.2,oppKPct:22.8,csw:24.1,oppWhiff:23.2,kLine:4.0},
+// ATL @ LAA 9:38 PM — Sale vs Soriano
+{name:“C. Sale”,        team:“ATL”,opp:“LAA”,hand:“LHP”,gameTime:“9:38 PM ET”,park:“Angel Stadium”,     wind:“Calm”,     temp:71, era:1.50,kPct:25.1,oppKPct:19.8,csw:30.2,oppWhiff:21.2,kLine:5.5},
+{name:“J. Soriano”,     team:“LAA”,opp:“ATL”,hand:“RHP”,gameTime:“9:38 PM ET”,park:“Angel Stadium”,     wind:“Calm”,     temp:71, era:3.42,kPct:18.8,oppKPct:23.4,csw:25.8,oppWhiff:24.8,kLine:4.0},
+],
+hitters: [
+// ── HOU @ COL (Coors, wind out, Bolton + Feltner = HR paradise) ──────────
+{name:“Y. Alvarez”,    team:“HOU”,opp:“COL”,oppPitcher:“R. Feltner”,  oppHand:“RHP”,hand:“LHH”,park:“Coors Field”,      wind:“Out 9mph”, temp:68,barrel:20.1,hardHit:57.4,iso:0.338,pullFB:21.8,pitcherHR9:1.82},
+{name:“I. Paredes”,    team:“HOU”,opp:“COL”,oppPitcher:“R. Feltner”,  oppHand:“RHP”,hand:“RHH”,park:“Coors Field”,      wind:“Out 9mph”, temp:68,barrel:16.2,hardHit:49.8,iso:0.281,pullFB:19.4,pitcherHR9:1.82},
+{name:“C. Walker”,     team:“HOU”,opp:“COL”,oppPitcher:“R. Feltner”,  oppHand:“RHP”,hand:“RHH”,park:“Coors Field”,      wind:“Out 9mph”, temp:68,barrel:14.8,hardHit:51.2,iso:0.272,pullFB:20.1,pitcherHR9:1.82},
+{name:“J. Loperfido”,  team:“HOU”,opp:“COL”,oppPitcher:“R. Feltner”,  oppHand:“RHP”,hand:“LHH”,park:“Coors Field”,      wind:“Out 9mph”, temp:68,barrel:12.4,hardHit:46.8,iso:0.248,pullFB:18.8,pitcherHR9:1.82},
+{name:“C. Smith”,      team:“HOU”,opp:“COL”,oppPitcher:“R. Feltner”,  oppHand:“RHP”,hand:“RHH”,park:“Coors Field”,      wind:“Out 9mph”, temp:68,barrel:11.8,hardHit:45.1,iso:0.238,pullFB:17.4,pitcherHR9:1.82},
+{name:“C. Tovar”,      team:“COL”,opp:“HOU”,oppPitcher:“C. Bolton”,   oppHand:“RHP”,hand:“RHH”,park:“Coors Field”,      wind:“Out 9mph”, temp:68,barrel:12.1,hardHit:44.2,iso:0.241,pullFB:17.8,pitcherHR9:2.10},
+{name:“B. Doyle”,      team:“COL”,opp:“HOU”,oppPitcher:“C. Bolton”,   oppHand:“RHP”,hand:“LHH”,park:“Coors Field”,      wind:“Out 9mph”, temp:68,barrel:11.4,hardHit:43.8,iso:0.228,pullFB:16.9,pitcherHR9:2.10},
+{name:“J. Naylor”,     team:“COL”,opp:“HOU”,oppPitcher:“C. Bolton”,   oppHand:“RHP”,hand:“LHH”,park:“Coors Field”,      wind:“Out 9mph”, temp:68,barrel:13.2,hardHit:47.1,iso:0.258,pullFB:18.2,pitcherHR9:2.10},
+{name:“R. McMahon”,    team:“COL”,opp:“HOU”,oppPitcher:“C. Bolton”,   oppHand:“RHP”,hand:“LHH”,park:“Coors Field”,      wind:“Out 9mph”, temp:68,barrel:10.8,hardHit:42.4,iso:0.221,pullFB:16.1,pitcherHR9:2.10},
+
+```
+  // ── SEA @ TEX (Gilbert vs deGrom — both hurt K totals, TEX power bats) ──
+  {name:"C. Seager",     team:"TEX",opp:"SEA",oppPitcher:"L. Gilbert",  oppHand:"RHP",hand:"LHH",park:"Globe Life Field", wind:"Calm",     temp:74,barrel:15.1,hardHit:52.4,iso:0.295,pullFB:20.8,pitcherHR9:0.82},
+  {name:"J. Burger",     team:"TEX",opp:"SEA",oppPitcher:"L. Gilbert",  oppHand:"RHP",hand:"RHH",park:"Globe Life Field", wind:"Calm",     temp:74,barrel:14.2,hardHit:48.8,iso:0.268,pullFB:19.1,pitcherHR9:0.82},
+  {name:"W. Langford",   team:"TEX",opp:"SEA",oppPitcher:"L. Gilbert",  oppHand:"RHP",hand:"RHH",park:"Globe Life Field", wind:"Calm",     temp:74,barrel:13.8,hardHit:47.9,iso:0.261,pullFB:18.4,pitcherHR9:0.82},
+  {name:"A. McCutchen",  team:"TEX",opp:"SEA",oppPitcher:"L. Gilbert",  oppHand:"RHP",hand:"RHH",park:"Globe Life Field", wind:"Calm",     temp:74,barrel:10.2,hardHit:43.1,iso:0.224,pullFB:16.8,pitcherHR9:0.82},
+  {name:"J. Rodriguez",  team:"SEA",opp:"TEX",oppPitcher:"J. deGrom",   oppHand:"RHP",hand:"RHH",park:"Globe Life Field", wind:"Calm",     temp:74,barrel:13.4,hardHit:48.2,iso:0.261,pullFB:18.1,pitcherHR9:0.74},
+  {name:"C. Raleigh",    team:"SEA",opp:"TEX",oppPitcher:"J. deGrom",   oppHand:"RHP",hand:"RHH",park:"Globe Life Field", wind:"Calm",     temp:74,barrel:15.8,hardHit:51.4,iso:0.288,pullFB:20.4,pitcherHR9:0.74},
+  {name:"J. Naylor",     team:"SEA",opp:"TEX",oppPitcher:"J. deGrom",   oppHand:"RHP",hand:"LHH",park:"Globe Life Field", wind:"Calm",     temp:74,barrel:12.8,hardHit:46.4,iso:0.252,pullFB:17.8,pitcherHR9:0.74},
+
+  // ── MIL @ BOS (Fenway, wind out 12mph, Woodruff/Bello) ──────────────────
+  {name:"T. Story",      team:"BOS",opp:"MIL",oppPitcher:"B. Woodruff", oppHand:"RHP",hand:"RHH",park:"Fenway Park",      wind:"Out 12mph",temp:58,barrel:13.8,hardHit:47.2,iso:0.258,pullFB:18.8,pitcherHR9:0.91},
+  {name:"W. Contreras",  team:"BOS",opp:"MIL",oppPitcher:"B. Woodruff", oppHand:"RHP",hand:"RHH",park:"Fenway Park",      wind:"Out 12mph",temp:58,barrel:12.9,hardHit:46.8,iso:0.248,pullFB:17.9,pitcherHR9:0.91},
+  {name:"J. Duran",      team:"BOS",opp:"MIL",oppPitcher:"B. Woodruff", oppHand:"RHP",hand:"LHH",park:"Fenway Park",      wind:"Out 12mph",temp:58,barrel:11.4,hardHit:44.8,iso:0.231,pullFB:16.8,pitcherHR9:0.91},
+  {name:"R. Anthony",    team:"BOS",opp:"MIL",oppPitcher:"B. Woodruff", oppHand:"RHP",hand:"LHH",park:"Fenway Park",      wind:"Out 12mph",temp:58,barrel:10.8,hardHit:43.2,iso:0.221,pullFB:16.1,pitcherHR9:0.91},
+  {name:"C. Yelich",     team:"MIL",opp:"BOS",oppPitcher:"B. Bello",    oppHand:"RHP",hand:"LHH",park:"Fenway Park",      wind:"Out 12mph",temp:58,barrel:14.1,hardHit:48.8,iso:0.271,pullFB:19.2,pitcherHR9:1.18},
+  {name:"J. Caglianone", team:"MIL",opp:"BOS",oppPitcher:"B. Bello",    oppHand:"RHP",hand:"LHH",park:"Fenway Park",      wind:"Out 12mph",temp:58,barrel:15.4,hardHit:50.2,iso:0.284,pullFB:20.8,pitcherHR9:1.18},
+  {name:"W. Adames",     team:"MIL",opp:"BOS",oppPitcher:"B. Bello",    oppHand:"RHP",hand:"RHH",park:"Fenway Park",      wind:"Out 12mph",temp:58,barrel:13.2,hardHit:47.1,iso:0.258,pullFB:18.4,pitcherHR9:1.18},
+
+  // ── LAD @ TOR (Wrobleski vs Scherzer) ────────────────────────────────────
+  {name:"S. Ohtani",     team:"LAD",opp:"TOR",oppPitcher:"M. Scherzer", oppHand:"RHP",hand:"LHH",park:"Rogers Centre",    wind:"Calm",     temp:55,barrel:16.8,hardHit:53.1,iso:0.301,pullFB:21.4,pitcherHR9:0.88},
+  {name:"F. Freeman",    team:"LAD",opp:"TOR",oppPitcher:"M. Scherzer", oppHand:"RHP",hand:"LHH",park:"Rogers Centre",    wind:"Calm",     temp:55,barrel:14.8,hardHit:49.2,iso:0.271,pullFB:18.1,pitcherHR9:0.88},
+  {name:"K. Tucker",     team:"LAD",opp:"TOR",oppPitcher:"M. Scherzer", oppHand:"RHP",hand:"LHH",park:"Rogers Centre",    wind:"Calm",     temp:55,barrel:16.3,hardHit:51.4,iso:0.295,pullFB:20.8,pitcherHR9:0.88},
+  {name:"T. Hernandez",  team:"LAD",opp:"TOR",oppPitcher:"M. Scherzer", oppHand:"RHP",hand:"RHH",park:"Rogers Centre",    wind:"Calm",     temp:55,barrel:12.8,hardHit:46.8,iso:0.251,pullFB:17.4,pitcherHR9:0.88},
+  {name:"V. Guerrero Jr",team:"TOR",opp:"LAD",oppPitcher:"J. Wrobleski", oppHand:"LHP",hand:"RHH",park:"Rogers Centre",   wind:"Calm",     temp:55,barrel:13.8,hardHit:48.1,iso:0.261,pullFB:18.2,pitcherHR9:1.48},
+  {name:"A. Barger",     team:"TOR",opp:"LAD",oppPitcher:"J. Wrobleski", oppHand:"LHP",hand:"RHH",park:"Rogers Centre",   wind:"Calm",     temp:55,barrel:12.1,hardHit:44.8,iso:0.241,pullFB:16.8,pitcherHR9:1.48},
+
+  // ── PHI @ SF (Painter vs Houser, Oracle Park) ─────────────────────────
+  {name:"B. Harper",     team:"PHI",opp:"SF", oppPitcher:"A. Houser",   oppHand:"RHP",hand:"LHH",park:"Oracle Park",      wind:"Calm",     temp:59,barrel:14.4,hardHit:50.8,iso:0.281,pullFB:19.2,pitcherHR9:1.12},
+  {name:"K. Schwarber",  team:"PHI",opp:"SF", oppPitcher:"A. Houser",   oppHand:"RHP",hand:"LHH",park:"Oracle Park",      wind:"Calm",     temp:59,barrel:15.8,hardHit:50.1,iso:0.278,pullFB:22.1,pitcherHR9:1.12},
+  {name:"A. Nola",       team:"PHI",opp:"SF", oppPitcher:"A. Houser",   oppHand:"RHP",hand:"RHH",park:"Oracle Park",      wind:"Calm",     temp:59,barrel:11.2,hardHit:43.8,iso:0.228,pullFB:16.4,pitcherHR9:1.12},
+  {name:"R. Devers",     team:"PHI",opp:"SF", oppPitcher:"A. Houser",   oppHand:"RHP",hand:"LHH",park:"Oracle Park",      wind:"Calm",     temp:59,barrel:15.8,hardHit:52.1,iso:0.289,pullFB:20.1,pitcherHR9:1.12},
+  {name:"L. Arraez",     team:"SF", opp:"PHI",oppPitcher:"A. Painter",  oppHand:"RHP",hand:"RHH",park:"Oracle Park",      wind:"Calm",     temp:59,barrel:4.2, hardHit:34.1,iso:0.118,pullFB:10.8,pitcherHR9:0.62},
+  {name:"M. Chapman",    team:"SF", opp:"PHI",oppPitcher:"A. Painter",  oppHand:"RHP",hand:"RHH",park:"Oracle Park",      wind:"Calm",     temp:59,barrel:12.8,hardHit:47.4,iso:0.251,pullFB:18.1,pitcherHR9:0.62},
+
+  // ── DET @ MIN (Mize vs Ryan) ──────────────────────────────────────────
+  {name:"T. Skubal",     team:"DET",opp:"MIN",oppPitcher:"J. Ryan",     oppHand:"RHP",hand:"LHH",park:"Target Field",     wind:"In 6mph",  temp:49,barrel:15.1,hardHit:48.7,iso:0.262,pullFB:17.4,pitcherHR9:1.42},
+  {name:"K. Manzardo",   team:"CLE",opp:"MIN",oppPitcher:"J. Ryan",     oppHand:"RHP",hand:"LHH",park:"Target Field",     wind:"In 6mph",  temp:49,barrel:13.4,hardHit:47.2,iso:0.251,pullFB:18.1,pitcherHR9:1.42},
+  {name:"M. Greene",     team:"DET",opp:"MIN",oppPitcher:"J. Ryan",     oppHand:"RHP",hand:"RHH",park:"Target Field",     wind:"In 6mph",  temp:49,barrel:12.8,hardHit:46.1,iso:0.241,pullFB:17.8,pitcherHR9:1.42},
+  {name:"B. Buxton",     team:"MIN",opp:"DET",oppPitcher:"C. Mize",     oppHand:"RHP",hand:"RHH",park:"Target Field",     wind:"In 6mph",  temp:49,barrel:14.8,hardHit:50.1,iso:0.278,pullFB:20.1,pitcherHR9:0.72},
+  {name:"M. Wallner",    team:"MIN",opp:"DET",oppPitcher:"C. Mize",     oppHand:"RHP",hand:"LHH",park:"Target Field",     wind:"In 6mph",  temp:49,barrel:12.1,hardHit:45.8,iso:0.241,pullFB:17.1,pitcherHR9:0.72},
+
+  // ── ATL @ LAA (Sale vs Soriano) ──────────────────────────────────────
+  {name:"M. Olson",      team:"ATL",opp:"LAA",oppPitcher:"J. Soriano",  oppHand:"RHP",hand:"LHH",park:"Angel Stadium",    wind:"Calm",     temp:71,barrel:15.1,hardHit:48.7,iso:0.262,pullFB:17.4,pitcherHR9:0.98},
+  {name:"O. Albies",     team:"ATL",opp:"LAA",oppPitcher:"J. Soriano",  oppHand:"RHP",hand:"SWI",park:"Angel Stadium",    wind:"Calm",     temp:71,barrel:13.2,hardHit:47.1,iso:0.248,pullFB:19.2,pitcherHR9:0.98},
+  {name:"M. Trout",      team:"LAA",opp:"ATL",oppPitcher:"C. Sale",     oppHand:"LHP",hand:"RHH",park:"Angel Stadium",    wind:"Calm",     temp:71,barrel:17.8,hardHit:54.2,iso:0.311,pullFB:21.8,pitcherHR9:0.72},
+  {name:"J. Soler",      team:"LAA",opp:"ATL",oppPitcher:"C. Sale",     oppHand:"LHP",hand:"RHH",park:"Angel Stadium",    wind:"Calm",     temp:71,barrel:14.8,hardHit:49.8,iso:0.271,pullFB:19.8,pitcherHR9:0.72},
+  {name:"Z. Neto",       team:"LAA",opp:"ATL",oppPitcher:"C. Sale",     oppHand:"LHP",hand:"RHH",park:"Angel Stadium",    wind:"Calm",     temp:71,barrel:11.8,hardHit:44.8,iso:0.238,pullFB:17.1,pitcherHR9:0.72},
+
+  // ── PIT @ SD (Chandler vs Marquez, Petco) ────────────────────────────
+  {name:"O. Cruz",       team:"PIT",opp:"SD", oppPitcher:"G. Marquez",  oppHand:"RHP",hand:"LHH",park:"Petco Park",       wind:"Calm",     temp:68,barrel:13.8,hardHit:48.4,iso:0.261,pullFB:18.8,pitcherHR9:1.64},
+  {name:"B. Reynolds",   team:"PIT",opp:"SD", oppPitcher:"G. Marquez",  oppHand:"RHP",hand:"SWI",park:"Petco Park",       wind:"Calm",     temp:68,barrel:11.8,hardHit:45.1,iso:0.238,pullFB:16.8,pitcherHR9:1.64},
+  {name:"M. Ozuna",      team:"PIT",opp:"SD", oppPitcher:"G. Marquez",  oppHand:"RHP",hand:"RHH",park:"Petco Park",       wind:"Calm",     temp:68,barrel:14.2,hardHit:48.8,iso:0.268,pullFB:19.1,pitcherHR9:1.64},
+  {name:"J. Tatis Jr.",  team:"SD", opp:"PIT",oppPitcher:"B. Chandler", oppHand:"RHP",hand:"RHH",park:"Petco Park",       wind:"Calm",     temp:68,barrel:14.8,hardHit:49.8,iso:0.271,pullFB:19.8,pitcherHR9:0.68},
+],
+nrfi: [
+  {away:"CHC",home:"TB", time:"4:10 PM ET",park:"Tropicana Field",   wind:"Dome",     temp:72,awayPitcher:"J. Taillon",   homePitcher:"S. McClanahan",awayF1ERA:3.20,homeF1ERA:2.10,nrfiHitRate:66,nrfiL10:6},
+  {away:"MIL",home:"BOS",time:"6:45 PM ET",park:"Fenway Park",       wind:"Out 12mph",temp:58,awayPitcher:"B. Woodruff",  homePitcher:"B. Bello",      awayF1ERA:2.80,homeF1ERA:3.40,nrfiHitRate:55,nrfiL10:5},
+  {away:"STL",home:"WSH",time:"6:45 PM ET",park:"Nationals Park",    wind:"In 8mph",  temp:63,awayPitcher:"A. Pallante",  homePitcher:"Z. Littell",    awayF1ERA:2.20,homeF1ERA:5.10,nrfiHitRate:48,nrfiL10:5},
+  {away:"PIT",home:"SD", time:"6:40 PM ET",park:"Petco Park",        wind:"Calm",     temp:68,awayPitcher:"B. Chandler",  homePitcher:"G. Marquez",    awayF1ERA:1.80,homeF1ERA:5.80,nrfiHitRate:51,nrfiL10:5},
+  {away:"LAD",home:"TOR",time:"7:07 PM ET",park:"Rogers Centre",     wind:"Calm",     temp:55,awayPitcher:"J. Wrobleski", homePitcher:"M. Scherzer",   awayF1ERA:5.40,homeF1ERA:2.40,nrfiHitRate:52,nrfiL10:5},
+  {away:"DET",home:"MIN",time:"7:40 PM ET",park:"Target Field",      wind:"In 6mph",  temp:49,awayPitcher:"C. Mize",      homePitcher:"J. Ryan",       awayF1ERA:1.50,homeF1ERA:4.80,nrfiHitRate:63,nrfiL10:7},
+  {away:"SEA",home:"TEX",time:"8:05 PM ET",park:"Globe Life Field",  wind:"Calm",     temp:74,awayPitcher:"L. Gilbert",   homePitcher:"J. deGrom",     awayF1ERA:3.80,homeF1ERA:3.20,nrfiHitRate:58,nrfiL10:6},
+  {away:"HOU",home:"COL",time:"8:40 PM ET",park:"Coors Field",       wind:"Out 9mph", temp:68,awayPitcher:"C. Bolton",    homePitcher:"R. Feltner",    awayF1ERA:4.20,homeF1ERA:5.80,nrfiHitRate:24,nrfiL10:2},
+  {away:"ATL",home:"LAA",time:"9:38 PM ET",park:"Angel Stadium",     wind:"Calm",     temp:71,awayPitcher:"C. Sale",      homePitcher:"J. Soriano",    awayF1ERA:1.80,homeF1ERA:3.80,nrfiHitRate:61,nrfiL10:6},
+  {away:"PHI",home:"SF", time:"9:45 PM ET",park:"Oracle Park",       wind:"Calm",     temp:59,awayPitcher:"A. Painter",   homePitcher:"A. Houser",     awayF1ERA:1.69,homeF1ERA:2.10,nrfiHitRate:64,nrfiL10:6},
+]
+```
+
+};
+return buildSlate(raw);
+}
+
+// ── MAIN APP ──────────────────────────────────────────────────────────────────
+export default function App() {
+const [loaded,setLoaded]        = useState(false);
+const [slate,setSlate]          = useState({pitchers:[],hitters:[],nrfiGames:[]});
+const [tab,setTab]              = useState(“pitchers”);
+const [expandedK,setExpandedK]  = useState(null);
+const [expandedHR,setExpandedHR]= useState(null);
+const [expandedNR,setExpandedNR]= useState(null);
+const [kFilter,setKFilter]      = useState(“all”);
+const [liveStatus,setLiveStatus]= useState(””); // “fetching” | “done” | “failed”
+
+const {pitchers,hitters,nrfiGames} = slate;
+
+// Try live fetch in background after app loads
+useEffect(()=>{
+if (!loaded) return;
+let live = true;
+async function tryLive(){
+setLiveStatus(“fetching”);
+const logArr = [];
+const raw = await fetchFullSlate(msgs => logArr.push(msgs));
+if (!live) return;
+if (raw) {
+const liveSlate = buildSlate(raw);
+if (liveSlate.pitchers.length > 0) {
+setSlate(liveSlate);
+setLiveStatus(“done”);
+return;
+}
+}
+setLiveStatus(“failed”);
+}
+tryLive();
+return ()=>{ live=false; };
+},[loaded]);
+
+const filteredP = pitchers.filter(p => {
+if(kFilter===“elite”)  return p.score>=75;
+if(kFilter===“avoid”)  return p.score<50;
+if(kFilter===“ladder”) return p.score>=62;
+return true;
+});
+
+const TABS = [
+{k:“pitchers”, l:“⚡ K Props”,  a:C.green},
+{k:“hitters”,  l:“💥 HR”,       a:C.orange},
+{k:“bygame”,   l:“🎯 By Game”,  a:C.purple},
+{k:“nrfi”,     l:“0️⃣ NRFI”,    a:C.teal},
+{k:“weights”,  l:“⚙️ Weights”,  a:C.yellow},
+];
+
+if (!loaded) return (
+<><style>{FONTS}</style>
+<LoadScreen onDone={()=>setLoaded(true)} onData={d=>setSlate(d)}/>
+</>
+);
+
+return (
+<>
+<style>{FONTS}{`*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}body{margin:0;background:#080A0D;}::-webkit-scrollbar{width:3px;height:3px;}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.15);border-radius:99px;}@keyframes pulse{0%,100%{opacity:0.4}50%{opacity:0.8}}`}</style>
+<div style={{minHeight:“100vh”,background:C.bg,fontFamily:”‘Inter’,sans-serif”,color:C.text,paddingBottom:64}}>
+
+```
+    {/* HEADER */}
+    <div style={{background:"#0C0E12",borderBottom:`1px solid ${C.border}`,padding:"12px 14px 0",position:"sticky",top:0,zIndex:100}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div>
+          <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:20,fontWeight:900,letterSpacing:1,color:"#fff"}}>⚾ MLB PROP ENGINE</div>
+          <div style={{fontSize:10,color:C.dim,marginTop:1}}><span style={{color:C.green}}>●</span> Live · {TODAY_DATE}</div>
+        </div>
+        <div style={{textAlign:"right"}}>
+          <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:14,fontWeight:700,color:C.yellow}}>{pitchers.length}P · {hitters.length}H</div>
+          <div style={{fontSize:9,color:C.dimmer}}>{nrfiGames.length} NRFI games</div>
+        </div>
+      </div>
+      <div style={{display:"flex"}}>
+        {TABS.map(t=>(
+          <button key={t.k} onClick={()=>setTab(t.k)} style={{flex:1,padding:"8px 0",background:"transparent",border:"none",cursor:"pointer",fontSize:11,fontWeight:700,color:tab===t.k?"#fff":C.dim,borderBottom:`2px solid ${tab===t.k?t.a:"transparent"}`,transition:"all 0.2s"}}>{t.l}</button>
+        ))}
+      </div>
+    </div>
+
+    {/* LIVE DATA STATUS BANNER */}
+    {liveStatus==="fetching"&&(
+      <div style={{background:"rgba(20,184,166,0.08)",borderBottom:`1px solid ${C.teal}25`,padding:"6px 14px",display:"flex",alignItems:"center",gap:6}}>
+        <div style={{width:6,height:6,borderRadius:"50%",background:C.teal,animation:"pulse 1s infinite"}}/>
+        <span style={{fontSize:11,color:C.teal}}>Fetching live projected lineups from RotoWire...</span>
+      </div>
+    )}
+    {liveStatus==="done"&&(
+      <div style={{background:"rgba(34,197,94,0.08)",borderBottom:`1px solid ${C.green}25`,padding:"6px 14px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <span style={{fontSize:11,color:C.green}}>✓ Live projected lineups loaded</span>
+        <button onClick={()=>{setLiveStatus("");setSlate(getSampleSlate());setTimeout(()=>setLoaded(p=>p),100);}} style={{fontSize:10,color:C.dimmer,background:"transparent",border:"none",cursor:"pointer"}}>reset</button>
+      </div>
+    )}
+    {liveStatus==="failed"&&(
+      <div style={{background:"rgba(249,115,22,0.07)",borderBottom:`1px solid ${C.orange}25`,padding:"6px 14px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <span style={{fontSize:11,color:C.orange}}>Using today's projected slate · Live fetch unavailable</span>
+        <button onClick={async()=>{
+          setLiveStatus("fetching");
+          const raw=await fetchFullSlate(()=>{});
+          if(raw){const s=buildSlate(raw);if(s.pitchers.length>0){setSlate(s);setLiveStatus("done");return;}}
+          setLiveStatus("failed");
+        }} style={{fontSize:10,color:C.orange,background:"rgba(249,115,22,0.15)",border:`1px solid ${C.orange}40`,borderRadius:4,padding:"2px 8px",cursor:"pointer"}}>Retry</button>
+      </div>
+    )}
+
+    {/* PITCHER TAB */}
+    {tab==="pitchers"&&(
+      <div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",borderBottom:`1px solid ${C.border}`}}>
+          {[{l:"Elite",v:pitchers.filter(p=>p.score>=75).length,c:C.green},{l:"Good",v:pitchers.filter(p=>p.score>=62&&p.score<75).length,c:C.yellow},{l:"Avoid",v:pitchers.filter(p=>p.score<50).length,c:C.red},{l:"Total",v:pitchers.length,c:C.blue}].map(s=>(
+            <div key={s.l} style={{background:C.panel,padding:"9px 6px",textAlign:"center",borderRight:`1px solid ${C.border}`}}>
+              <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:22,fontWeight:900,color:s.c}}>{s.v}</div>
+              <div style={{fontSize:9,color:C.dimmer}}>{s.l}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{padding:"8px 14px",display:"flex",gap:6,overflowX:"auto",borderBottom:`1px solid ${C.borderLight}`}}>
+          {[["all","All"],["elite","Elite/Great"],["ladder","Has Ladder"],["avoid","Avoid"]].map(([k,l])=>(
+            <button key={k} onClick={()=>setKFilter(k)} style={{background:kFilter===k?"rgba(34,197,94,0.12)":"rgba(255,255,255,0.05)",border:`1px solid ${kFilter===k?C.green+"50":C.border}`,borderRadius:99,padding:"4px 12px",color:kFilter===k?C.green:C.dim,fontSize:11,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>{l}</button>
+          ))}
+        </div>
+        <div style={{padding:"4px 14px",display:"flex",gap:10,overflowX:"auto",borderBottom:`1px solid ${C.borderLight}`,background:"rgba(255,255,255,0.01)"}}>
+          {[["💨","Wind Out",C.green],["🌬️","Wind In",C.red],["🏟️","Dome",C.dim],["☀️","75°+",C.yellow],["🥶","<50°",C.blue],["🚀","HR Park",C.green],["📉","Pitcher Park",C.red],["🔥","ELITE"],["✅","GREAT"],["👍","GOOD"],["⚠️","AVG"],["❌","BAD"]].map(([icon,label,color])=>(
+            <span key={label} style={{fontSize:9,color:color||C.dimmer,whiteSpace:"nowrap"}}>{icon} {label}</span>
+          ))}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"28px 1fr 52px 62px",padding:"5px 14px",borderBottom:`1px solid ${C.border}`}}>
+          {["#","Pitcher / Matchup","Proj K","Score"].map((h,i)=>(
+            <div key={h} style={{fontSize:9,fontWeight:600,color:C.dimmer,textAlign:i>=2?"center":"left"}}>{h}</div>
+          ))}
+        </div>
+        {filteredP.map(p=>(
+          <PRow key={p.name} p={p} rank={pitchers.indexOf(p)+1} expanded={expandedK===p.name} onToggle={()=>setExpandedK(expandedK===p.name?null:p.name)}/>
+        ))}
+      </div>
+    )}
+
+    {/* HR TAB */}
+    {tab==="hitters"&&(
+      <div>
+        {hitters.length>0&&(
+          <div style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}`}}>
+            <div style={{fontSize:10,fontWeight:700,color:C.dim,marginBottom:8}}>TOP SIMULATION TARGETS</div>
+            <div style={{display:"flex",gap:6,overflowX:"auto"}}>
+              {hitters.slice(0,5).map((h,i)=>(
+                <div key={h.name} onClick={()=>setExpandedHR(h.name)} style={{flexShrink:0,background:`${h.verdict.color}0D`,border:`1px solid ${h.verdict.color}30`,borderRadius:8,padding:"7px 10px",cursor:"pointer",minWidth:80}}>
+                  <div style={{fontSize:9,color:C.dimmer}}>#{i+1}</div>
+                  <div style={{fontSize:12,fontWeight:700,color:C.text}}>{h.name.split(" ").at(-1)}</div>
+                  <div style={{fontSize:11,fontWeight:700,color:h.verdict.color}}>{(h.sim.prob*100).toFixed(0)}%</div>
+                  <div style={{fontSize:9,color:C.dimmer}}>{h.team}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        <div style={{display:"grid",gridTemplateColumns:"28px 1fr 52px 62px",padding:"5px 14px",borderBottom:`1px solid ${C.border}`}}>
+          {["#","Player / Matchup","HR%","Score"].map((h,i)=>(
+            <div key={h} style={{fontSize:9,fontWeight:600,color:C.dimmer,textAlign:i>=2?"center":"left"}}>{h}</div>
+          ))}
+        </div>
+        {hitters.map((h,i)=>(
+          <HRow key={h.name} h={h} rank={i+1} expanded={expandedHR===h.name} onToggle={()=>setExpandedHR(expandedHR===h.name?null:h.name)}/>
+        ))}
+      </div>
+    )}
+
+    {/* BY GAME HR TAB */}
+    {tab==="bygame"&&(
+      <div>
+        <div style={{padding:"10px 14px 4px",borderBottom:`1px solid ${C.border}`}}>
+          <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:16,fontWeight:800,color:C.text}}>🎯 TOP 4 HR TARGETS PER GAME</div>
+          <div style={{fontSize:11,color:C.dim,marginTop:2}}>Best power matchup in each game · tap player to expand</div>
+        </div>
+        {(()=>{
+          // Group hitters by matchup (away@home)
+          const gameMap = {};
+          hitters.forEach(h => {
+            // Find opposing teams to build game key
+            const key = [h.team, h.opp].sort().join("@");
+            if (!gameMap[key]) gameMap[key] = { key, players:[], away:"", home:"", time:"", park:"", wind:"", temp:0, parkFactor:1 };
+            gameMap[key].players.push(h);
+          });
+          // Sort each game's players by score, take top 4
+          return Object.values(gameMap)
+            .filter(g => g.players.length > 0)
+            .sort((a,b) => b.players[0].score - a.players[0].score)
+            .map(game => {
+              const top4 = [...game.players].sort((a,b)=>b.score-a.score).slice(0,4);
+              const sample = top4[0];
+              const isDome = /dome|indoor/i.test(sample.wind||"");
+              const teams = [sample.team, sample.opp].sort();
+              return (
+                <div key={game.key} style={{marginBottom:0,borderBottom:`1px solid ${C.border}`}}>
+                  {/* Game header */}
+                  <div style={{padding:"10px 14px 6px",background:"rgba(255,255,255,0.02)"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                      <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:16,fontWeight:800,color:C.text}}>
+                        {teams[0]} <span style={{color:C.dimmer,fontWeight:400}}>vs</span> {teams[1]}
+                      </div>
+                      <span style={{fontSize:11,fontWeight:600,color:C.yellow}}>{sample.gameTime||sample.weather?.time||"—"}</span>
+                    </div>
+                    <div style={{fontSize:10,color:C.dimmer,marginBottom:4}}>{sample.weather?.park||sample.park||"—"}</div>
+                    <WeatherStrip wind={sample.weather?.wind||sample.wind} temp={sample.weather?.temp||sample.temp} parkFactor={sample.weather?.factor||sample.parkFactor||1}/>
+                  </div>
+                  {/* Top 4 players as compact cards */}
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:1,background:C.border,margin:"0 0 0 0"}}>
+                    {top4.map((h,i) => (
+                      <div key={h.name} onClick={()=>setExpandedHR(expandedHR===`${game.key}-${h.name}`?null:`${game.key}-${h.name}`)}
+                        style={{background:expandedHR===`${game.key}-${h.name}`?"rgba(255,255,255,0.04)":C.panel,padding:"10px 12px",cursor:"pointer"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
+                          <div>
+                            <div style={{fontSize:9,color:C.dimmer,marginBottom:1}}>#{i+1} {h.team}</div>
+                            <div style={{fontSize:13,fontWeight:700,color:C.text,lineHeight:1.2}}>{h.name}</div>
+                            <div style={{fontSize:9,color:C.dim,marginTop:2}}>{h.oppHand} · {h.oppPitcher?.split(" ").at(-1)||"—"}</div>
+                          </div>
+                          <div style={{textAlign:"right"}}>
+                            <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:18,fontWeight:900,color:h.verdict.color}}>{h.score}</div>
+                            <div style={{fontSize:9,color:C.dimmer}}>/100</div>
+                          </div>
+                        </div>
+                        {/* Mini stat row */}
+                        <div style={{display:"flex",gap:8,marginBottom:4}}>
+                          <div style={{textAlign:"center"}}>
+                            <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:13,fontWeight:700,color:C.blue}}>{(h.sim.prob*100).toFixed(0)}%</div>
+                            <div style={{fontSize:8,color:C.dimmer}}>HR%</div>
+                          </div>
+                          <div style={{textAlign:"center"}}>
+                            <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:13,fontWeight:700,color:h.barrel>=15?C.green:C.text}}>{h.barrel}%</div>
+                            <div style={{fontSize:8,color:C.dimmer}}>Barrel</div>
+                          </div>
+                          <div style={{textAlign:"center"}}>
+                            <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:13,fontWeight:700,color:C.text}}>{h.iso?.toFixed(3)||"—"}</div>
+                            <div style={{fontSize:8,color:C.dimmer}}>ISO</div>
+                          </div>
+                        </div>
+                        {/* Hit rate bar */}
+                        <div style={{height:4,background:"rgba(255,255,255,0.07)",borderRadius:99,overflow:"hidden"}}>
+                          <div style={{height:"100%",width:`${Math.min(100,h.sim.prob*100*3.3)}%`,background:h.verdict.color,borderRadius:99}}/>
+                        </div>
+                        <div style={{display:"flex",gap:4,marginTop:3}}>
+                          <span style={{fontSize:8,fontWeight:700,color:h.evDK.ev>0?C.green:C.red}}>{h.evDK.ev>0?"+":""}{h.evDK.ev.toFixed(1)}% DK</span>
+                          <span style={{fontSize:8,fontWeight:700,color:h.evFD.ev>0?C.green:C.red}}>{h.evFD.ev>0?"+":""}{h.evFD.ev.toFixed(1)}% FD</span>
+                        </div>
+                        {/* Expanded detail */}
+                        {expandedHR===`${game.key}-${h.name}`&&(
+                          <div style={{marginTop:8,paddingTop:8,borderTop:`1px solid ${C.border}`}}>
+                            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,marginBottom:6}}>
+                              {[{l:"Hard Hit",v:`${h.hardHit}%`},{l:"Pull×FB",v:`${h.pullFB}`},{l:"P HR/9",v:h.pitcherHR9?.toFixed(2)},{l:"Park",v:`${(h.weather?.factor||h.parkFactor||1).toFixed(2)}x`}].map(s=>(
+                                <div key={s.l} style={{background:"rgba(255,255,255,0.05)",borderRadius:4,padding:"4px 6px"}}>
+                                  <div style={{fontSize:8,color:C.dimmer}}>{s.l}</div>
+                                  <div style={{fontSize:12,fontWeight:700,color:C.text,fontFamily:"'Barlow Condensed',sans-serif"}}>{s.v}</div>
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{fontSize:9,color:C.dimmer}}>{h.sim.hits}/1,000 sims hit HR</div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {/* Pad to even grid if only 3 */}
+                    {top4.length===3&&<div style={{background:C.panel}}/>}
+                  </div>
+                </div>
+              );
+            });
+        })()}
+      </div>
+    )}
+
+    {/* WEIGHTS TAB */}
+    {tab==="weights"&&(
+      <WeightsTab
+        hitters={hitters}
+        pitchers={pitchers}
+        onRescore={(newH, newP) => setSlate(s=>({...s, hitters:newH, pitchers:newP}))}
+      />
+    )}
+
+    {/* NRFI TAB */}
+    {tab==="nrfi"&&(
+      <div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",borderBottom:`1px solid ${C.border}`}}>
+          {[{l:"Strong NRFI",v:nrfiGames.filter(g=>g.nrfiHitRate>=65).length,c:C.green},{l:"Strong YRFI",v:nrfiGames.filter(g=>g.yrfiHitRate>=60).length,c:C.red},{l:"Avg NRFI%",v:nrfiGames.length?`${Math.round(nrfiGames.reduce((s,g)=>s+g.nrfiHitRate,0)/nrfiGames.length)}%`:"—",c:C.blue}].map(s=>(
+            <div key={s.l} style={{background:C.panel,padding:"9px 6px",textAlign:"center",borderRight:`1px solid ${C.border}`}}>
+              <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:22,fontWeight:900,color:s.c}}>{s.v}</div>
+              <div style={{fontSize:9,color:C.dimmer}}>{s.l}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{padding:"12px 14px"}}>
+          {[...nrfiGames].sort((a,b)=>b.nrfiHitRate-a.nrfiHitRate).map(g=>(
+            <NRFICard key={`${g.away}@${g.home}`} g={g} expanded={expandedNR===`${g.away}@${g.home}`} onToggle={()=>setExpandedNR(expandedNR===`${g.away}@${g.home}`?null:`${g.away}@${g.home}`)}/>
+          ))}
+        </div>
+      </div>
+    )}
+
+    {/* FOOTER */}
+    <div style={{position:"fixed",bottom:0,left:0,right:0,background:"rgba(8,10,13,0.97)",borderTop:`1px solid ${C.border}`,padding:"8px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <span style={{fontSize:10,color:C.dimmer}}>Claude AI · Web Search</span>
+      <span style={{fontSize:10,color:C.green}}>● {TODAY_DATE}</span>
+      <span style={{fontSize:10,color:C.teal}}>{pitchers.length}P · {hitters.length}H · {nrfiGames.length}G</span>
+    </div>
+  </div>
+</>
+```
+
+);
+}
